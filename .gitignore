@@ -1,0 +1,11 @@
+# OS
+.DS_Store
+
+# Zephyr SDK and dependencies (installed via west)
+zephyr_workspace/zephyrproject/
+
+# Python virtualenv
+zephyr_workspace/ble_test_env/
+
+# Build artifacts
+build/
