@@ -18,8 +18,8 @@
 #define DEVICE_NAME     CONFIG_BT_DEVICE_NAME
 #define DEVICE_NAME_LEN (sizeof(DEVICE_NAME) - 1)
 
-#define SDU_LEN          2000
-#define TX_BUF_COUNT     2  /* Double-buffer */
+#define SDU_LEN          495
+#define TX_BUF_COUNT     3
 #define STATS_INTERVAL_MS 1000
 
 /* PSM Discovery Service UUIDs */
@@ -42,6 +42,7 @@ static struct k_sem tx_sem;
 /* Stats */
 static uint32_t bytes_sent;
 static volatile bool l2cap_connected;
+static volatile bool dle_ready;
 
 static struct k_work_delayable conn_param_work;
 
@@ -53,6 +54,13 @@ static void tx_buf_destroy(struct net_buf *buf)
 
 NET_BUF_POOL_DEFINE(sdu_tx_pool, TX_BUF_COUNT, BT_L2CAP_SDU_BUF_SIZE(SDU_LEN),
 		    CONFIG_BT_CONN_TX_USER_DATA_SIZE, tx_buf_destroy);
+
+/* RX buffer pool for segmented SDU reassembly */
+NET_BUF_POOL_DEFINE(sdu_rx_pool, 2, BT_L2CAP_SDU_BUF_SIZE(SDU_LEN),
+		    CONFIG_BT_CONN_TX_USER_DATA_SIZE, NULL);
+
+/* Negotiated TX SDU size (may be less than SDU_LEN) */
+static uint16_t tx_sdu_len;
 
 /* Test data pattern */
 static uint8_t tx_data[SDU_LEN];
@@ -68,12 +76,17 @@ static void l2cap_chan_connected(struct bt_l2cap_chan *chan)
 	       le_chan->tx.mtu, le_chan->tx.mps,
 	       le_chan->rx.mtu, le_chan->rx.mps);
 
+	/* Limit SDU size to negotiated TX MTU */
+	tx_sdu_len = MIN(SDU_LEN, le_chan->tx.mtu);
+	printk("Using TX SDU size: %u\n", tx_sdu_len);
+
 	l2cap_connected = true;
 	bytes_sent = 0;
 
-	/* Allow initial sends */
-	k_sem_give(&tx_sem);
-	k_sem_give(&tx_sem);
+	/* Allow multiple sends to keep the pipe full */
+	for (int i = 0; i < TX_BUF_COUNT; i++) {
+		k_sem_give(&tx_sem);
+	}
 }
 
 static void l2cap_chan_disconnected(struct bt_l2cap_chan *chan)
@@ -81,6 +94,11 @@ static void l2cap_chan_disconnected(struct bt_l2cap_chan *chan)
 	printk("L2CAP channel disconnected\n");
 	l2cap_connected = false;
 	k_sem_reset(&tx_sem);
+}
+
+static struct net_buf *l2cap_chan_alloc_buf(struct bt_l2cap_chan *chan)
+{
+	return net_buf_alloc(&sdu_rx_pool, K_NO_WAIT);
 }
 
 static int l2cap_chan_recv(struct bt_l2cap_chan *chan, struct net_buf *buf)
@@ -97,6 +115,7 @@ static void l2cap_chan_sent(struct bt_l2cap_chan *chan)
 static const struct bt_l2cap_chan_ops l2cap_chan_ops = {
 	.connected = l2cap_chan_connected,
 	.disconnected = l2cap_chan_disconnected,
+	.alloc_buf = l2cap_chan_alloc_buf,
 	.recv = l2cap_chan_recv,
 	.sent = l2cap_chan_sent,
 };
@@ -195,7 +214,10 @@ static void connected(struct bt_conn *conn, uint8_t err)
 	printk("Connected: %s\n", addr);
 	current_conn = bt_conn_ref(conn);
 
-	k_work_schedule(&conn_param_work, K_SECONDS(1));
+	/* Stop advertising to free radio time for data transfer */
+	bt_le_adv_stop();
+
+	k_work_schedule(&conn_param_work, K_MSEC(50));
 }
 
 static void disconnected(struct bt_conn *conn, uint8_t reason)
@@ -212,6 +234,7 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 
 	k_work_cancel_delayable(&conn_param_work);
 	l2cap_connected = false;
+	dle_ready = false;
 	bytes_sent = 0;
 	k_sem_reset(&tx_sem);
 }
@@ -235,6 +258,10 @@ static void le_data_len_updated(struct bt_conn *conn,
 	printk("Data Length updated: TX len=%u time=%u, RX len=%u time=%u\n",
 	       info->tx_max_len, info->tx_max_time,
 	       info->rx_max_len, info->rx_max_time);
+
+	if (info->tx_max_len >= 251) {
+		dle_ready = true;
+	}
 }
 
 BT_CONN_CB_DEFINE(conn_callbacks) = {
@@ -255,7 +282,7 @@ void stream_thread(void)
 	}
 
 	while (1) {
-		if (!l2cap_connected) {
+		if (!l2cap_connected || !dle_ready) {
 			k_sleep(K_MSEC(100));
 			continue;
 		}
@@ -269,22 +296,20 @@ void stream_thread(void)
 
 		struct net_buf *buf = net_buf_alloc(&sdu_tx_pool, K_MSEC(100));
 		if (!buf) {
-			printk("TX buf alloc failed\n");
 			k_sem_give(&tx_sem);
 			continue;
 		}
 
 		net_buf_reserve(buf, BT_L2CAP_SDU_CHAN_SEND_RESERVE);
-		net_buf_add_mem(buf, tx_data, SDU_LEN);
+		net_buf_add_mem(buf, tx_data, tx_sdu_len);
 
 		int ret = bt_l2cap_chan_send(&l2cap_chan.chan, buf);
 		if (ret < 0) {
-			printk("L2CAP send failed (err %d)\n", ret);
 			net_buf_unref(buf);
 			k_sem_give(&tx_sem);
 			k_sleep(K_MSEC(10));
 		} else {
-			bytes_sent += SDU_LEN;
+			bytes_sent += tx_sdu_len;
 		}
 	}
 }
@@ -298,7 +323,7 @@ void stats_thread(void)
 	while (1) {
 		k_sleep(K_MSEC(STATS_INTERVAL_MS));
 
-		if (l2cap_connected) {
+		if (l2cap_connected && dle_ready) {
 			uint32_t delta = bytes_sent - prev_bytes;
 			prev_bytes = bytes_sent;
 

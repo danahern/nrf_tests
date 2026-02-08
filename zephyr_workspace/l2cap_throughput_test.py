@@ -54,6 +54,8 @@ class L2CAPThroughputTest(NSObject):
         self.start_time = None
         self.last_report_time = None
         self.last_report_bytes = 0
+        self.steady_state_time = None
+        self.steady_state_bytes = 0
 
         self.central = CBCentralManager.alloc().initWithDelegate_queue_(self, None)
         return self
@@ -152,6 +154,8 @@ class L2CAPThroughputTest(NSObject):
         self.last_report_time = self.start_time
         self.last_report_bytes = 0
         self.rx_bytes = 0
+        self.steady_state_time = None
+        self.steady_state_bytes = 0
 
         print("Receiving data...")
 
@@ -163,9 +167,14 @@ class L2CAPThroughputTest(NSObject):
             buf_size = 65536
             buf = bytearray(buf_size)
             while stream.hasBytesAvailable():
-                read = stream.read_maxLength_(buf, buf_size)
-                if read > 0:
-                    self.rx_bytes += read
+                result = stream.read_maxLength_(buf, buf_size)
+                # PyObjC returns (bytes_read, data) tuple
+                if isinstance(result, tuple):
+                    n = result[0]
+                else:
+                    n = result
+                if n > 0:
+                    self.rx_bytes += n
 
     # -- Stats Timer --
 
@@ -174,25 +183,31 @@ class L2CAPThroughputTest(NSObject):
             return
 
         now = time.time()
+        elapsed = now - self.start_time
+
+        # Mark steady-state start at 5 seconds
+        if self.steady_state_time is None and elapsed >= 5.0:
+            self.steady_state_time = now
+            self.steady_state_bytes = self.rx_bytes
+
+        if self.duration > 0 and elapsed >= self.duration:
+            self._print_final_stats()
+            sys.exit(0)
+
         interval = now - self.last_report_time
         if interval < 0.5:
             return
 
-        delta = self.rx_bytes - self.last_report_bytes
-        kbps = (delta * 8) / (interval * 1000)
-        elapsed = now - self.start_time
-        avg_kbps = (self.rx_bytes * 8) / (elapsed * 1000) if elapsed > 0 else 0
-
-        print(f"RX: {kbps:.0f} kbps (avg: {avg_kbps:.0f} kbps) | "
-              f"{self.rx_bytes:,} bytes in {elapsed:.1f}s")
+        # Only print periodic stats if no fixed duration (interactive mode)
+        if self.duration == 0:
+            delta = self.rx_bytes - self.last_report_bytes
+            kbps = (delta * 8) / (interval * 1000)
+            avg_kbps = (self.rx_bytes * 8) / (elapsed * 1000) if elapsed > 0 else 0
+            print(f"RX: {kbps:.0f} kbps (avg: {avg_kbps:.0f} kbps) | "
+                  f"{self.rx_bytes:,} bytes in {elapsed:.1f}s")
 
         self.last_report_time = now
         self.last_report_bytes = self.rx_bytes
-
-        if self.duration > 0 and elapsed >= self.duration:
-            self._print_final_stats()
-            print("Duration reached, stopping.")
-            sys.exit(0)
 
     def _print_final_stats(self):
         if self.start_time is None:
@@ -204,6 +219,13 @@ class L2CAPThroughputTest(NSObject):
             print(f"Duration: {elapsed:.1f}s")
             print(f"Total RX: {self.rx_bytes:,} bytes")
             print(f"Average:  {avg_kbps:.0f} kbps")
+
+            if self.steady_state_time is not None:
+                ss_elapsed = time.time() - self.steady_state_time
+                ss_bytes = self.rx_bytes - self.steady_state_bytes
+                if ss_elapsed > 0:
+                    ss_kbps = (ss_bytes * 8) / (ss_elapsed * 1000)
+                    print(f"Steady-state (last {ss_elapsed:.0f}s): {ss_kbps:.0f} kbps")
 
 
 def main():

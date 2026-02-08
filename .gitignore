@@ -9,3 +9,6 @@ zephyr_workspace/ble_test_env/
 
 # Build artifacts
 build/
+
+# cache
+zephyr_workspace/.cache
