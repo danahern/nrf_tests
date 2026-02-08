@@ -50,6 +50,7 @@ static uint8_t test_data[TEST_DATA_SIZE];
 static bool notify_enabled = false;
 static struct k_work_delayable conn_param_work;
 
+
 /* TX rate control: 0 = disabled, >0 = target kbps */
 static uint32_t target_tx_kbps = 0;  /* Default: max speed (0 = no delay) */
 
@@ -77,10 +78,20 @@ static void conn_param_work_handler(struct k_work *work)
 		printk("PHY update request failed (err %d)\n", err);
 	}
 
+	/* Request Data Length Update for max PDU size */
+	struct bt_conn_le_data_len_param dl_param = {
+		.tx_max_len = 251,
+		.tx_max_time = 2120, /* 2120us for 251 bytes at 1M PHY */
+	};
+	err = bt_conn_le_data_len_update(current_conn, &dl_param);
+	if (err) {
+		printk("Data length update failed (err %d)\n", err);
+	}
+
 	/* Request connection parameter update for better throughput */
-	/* Using 15ms (interval=12) instead of 7.5ms - macOS more likely to accept */
+	/* Give macOS a range: 7.5ms-15ms (interval 6-12) */
 	struct bt_le_conn_param param = {
-		.interval_min = 12,
+		.interval_min = 6,
 		.interval_max = 12,
 		.latency = 0,
 		.timeout = 400,
@@ -201,6 +212,14 @@ static void le_phy_updated(struct bt_conn *conn,
 	printk("PHY updated: TX PHY %u, RX PHY %u\n", param->tx_phy, param->rx_phy);
 }
 
+static void le_data_len_updated(struct bt_conn *conn,
+				struct bt_conn_le_data_len_info *info)
+{
+	printk("*** Data Length updated: TX max_len=%u max_time=%u, RX max_len=%u max_time=%u ***\n",
+	       info->tx_max_len, info->tx_max_time,
+	       info->rx_max_len, info->rx_max_time);
+}
+
 static void mtu_updated(struct bt_conn *conn, uint16_t tx, uint16_t rx)
 {
 	printk("*** MTU UPDATED: TX=%u, RX=%u (max payload: %u bytes) ***\n",
@@ -216,6 +235,7 @@ BT_CONN_CB_DEFINE(conn_callbacks) = {
 	.disconnected = disconnected,
 	.le_param_updated = le_param_updated,
 	.le_phy_updated = le_phy_updated,
+	.le_data_len_updated = le_data_len_updated,
 };
 
 static int send_data(const uint8_t *data, uint16_t len)
@@ -224,13 +244,7 @@ static int send_data(const uint8_t *data, uint16_t len)
 		return -ENOTCONN;
 	}
 
-	struct bt_gatt_notify_params params = {
-		.attr = &throughput_svc.attrs[1],
-		.data = data,
-		.len = len,
-	};
-
-	return bt_gatt_notify_cb(current_conn, &params);
+	return bt_gatt_notify(current_conn, &throughput_svc.attrs[1], data, len);
 }
 
 void stats_thread(void)
@@ -302,7 +316,6 @@ void stream_thread(void)
 {
 	timing_t start_time, end_time;
 	uint64_t cycles;
-	uint32_t delay_ms;
 
 	/* Initialize test data pattern */
 	for (int i = 0; i < TEST_DATA_SIZE; i++) {
@@ -324,25 +337,17 @@ void stream_thread(void)
 				iterations++;
 			}
 
-			/* Calculate delay based on target TX rate */
 			if (target_tx_kbps == 0) {
-				/* Max speed - minimal delay */
-				delay_ms = 10;
+				/* Max speed - 5ms send interval */
+				k_sleep(K_MSEC(5));
 			} else {
-				/* Calculate delay to achieve target rate */
-				/* target_kbps = (bytes/sec * 8) / 1000 */
-				/* bytes/sec = (target_kbps * 1000) / 8 */
-				/* delay_ms = (packet_size / bytes_per_sec) * 1000 */
 				uint32_t bytes_per_sec = (target_tx_kbps * 1000) / 8;
-				delay_ms = (TEST_DATA_SIZE * 1000) / bytes_per_sec;
-
-				/* Minimum delay to prevent stack overflow */
+				uint32_t delay_ms = (TEST_DATA_SIZE * 1000) / bytes_per_sec;
 				if (delay_ms < 5) {
 					delay_ms = 5;
 				}
+				k_sleep(K_MSEC(delay_ms));
 			}
-
-			k_sleep(K_MSEC(delay_ms));
 		} else {
 			k_sleep(K_MSEC(100));
 		}
