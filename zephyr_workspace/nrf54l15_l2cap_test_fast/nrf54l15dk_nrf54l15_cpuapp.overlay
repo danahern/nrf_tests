@@ -1,0 +1,12 @@
+/*
+ * Board overlay for nRF54L15 DK
+ */
+
+&radio {
+	status = "okay";
+};
+
+&uart20 {
+	status = "okay";
+	current-speed = <115200>;
+};

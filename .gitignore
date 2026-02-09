@@ -9,6 +9,16 @@ zephyr_workspace/ble_test_env/
 
 # Build artifacts
 build/
+**/build_ncs/
 
-# cache
-zephyr_workspace/.cache
+# Clangd caches
+**/.cache/
+
+# nrfutil binary
+nrfutil
+
+# Xcode user state
+**/*.xcuserstate
+**/xcuserdata/
+**/.swiftpm/
+**/project.xcworkspace/contents.xcworkspacedata
