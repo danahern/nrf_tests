@@ -1,6 +1,6 @@
 # L2CAP CoC Throughput Test - Plan
 
-## Status: Step 6 - nRF-to-nRF Test COMPLETE — 1285 kbps achieved
+## Status: Step 7 - SDC Optimization COMPLETE — 1317 kbps achieved
 
 ## Steps
 
@@ -10,12 +10,12 @@
 4. **Documentation** - DONE
 5. **Test and optimize L2CAP CoC** - BLOCKED BY macOS
 
-## Current Best Config (flashed)
+## Current Best Config (flashed — `_fast` variants)
 
-- SDU_LEN=492, TX_BUF_COUNT=6, sem flow control, stream priority 5
-- Zephyr LL (BT_CTLR_PHY_2M, BT_CTLR_RX_BUFFERS=10)
-- DLE gate, advertising stop on connect
-- **nRF-to-nRF: 1285 kbps** (2.4x macOS, 2.9x iOS)
+- SDU_LEN=2000, TX_BUF_COUNT=10, batch credit flow (80 initial, 10-per-10)
+- Nordic SoftDevice Controller (SDC), 2M PHY, DLE=251
+- CI=50ms (interval 40), SDC_TX=20 (periph), SDC_TX/RX=10 (central)
+- **nRF-to-nRF: 1317 kbps** (92% of 1426 kbps theoretical max)
 - **macOS: ~530 kbps** | **iOS: ~446 kbps**
 
 ## Important Notes
@@ -42,10 +42,13 @@
 | 19 | 492 | sem 6 | 6 tx | Zephyr LL (iOS central) | **446** | iPhone 17 Pro Max, WORSE than macOS |
 | 20a | 492 | sem 6 | 6 tx | Zephyr LL (nRF central, recv) | **62** | 1-credit bottleneck |
 | 20b | 492 | sem 6 | 6 tx | Zephyr LL (nRF central, seg_recv) | **1285** | 20x! seg_recv + bulk credits |
+| SDC-0 | 2000 | batch 10/10 | 10 tx | SDC, CI=7.5ms | **1050** | Initial SDC migration |
+| SDC-5 | 2000 | batch 10/10 | 10 tx | SDC, CI=50ms | **1317** | Best overall — 92% theoretical max |
+| SDC-11 | 2000 | batch 10/10 | 10 tx | SDC, CI=50ms, RX=10 | **1317** | Rock solid, recommended config |
 
 ## Exhaustive Findings
 
-### What we tried that DID NOT help:
+### What we tried that DID NOT help (macOS central):
 - Nordic SoftDevice Controller (SDC) vs Zephyr LL → same or worse
 - SDC TX_PACKET_COUNT=10 → worse (495 kbps)
 - SDC MAX_CONN_EVENT_LEN=15000 → worse (429 kbps)
@@ -57,16 +60,31 @@
 - Sleep-based flow control → worse than semaphore
 - GATT notifications (various pacing) → same ceiling
 
-### What DOES help:
+### What DOES help (macOS central):
 - 492-495 byte SDU (2-fragment sweet spot)
 - Semaphore flow control with 6 in-flight
 - DLE gate (avoid 27-byte packet waste at start)
 - Zephyr LL slightly better than SDC
 
-### Root cause:
+### macOS root cause:
 macOS forces 15ms CI and limits ~4-5 LL packets per connection event.
-Nordic's official throughput sample achieves 1363 kbps using nRF-to-nRF (not macOS).
 **The macOS BLE stack is the bottleneck, not the firmware.**
+
+### What DOES help (nRF-to-nRF, SDC optimization):
+- SDC controller (stable at all CI values, unlike Zephyr LL which crashes at CI < 15ms)
+- 50ms CI (longer CI = more PDUs per connection event = higher throughput)
+- SDU_LEN=2000 (marginal gain, reduces SDU header overhead)
+- Batch credit replenishment (10-per-10 vs 1-per-segment reduces credit PDU airtime)
+- 80 initial L2CAP credits (ensures sender never stalls at startup)
+- SDC_TX_PACKET_COUNT=20 on peripheral (enough LL buffers to fill a 50ms CE)
+- SDC_RX_PACKET_COUNT=10 on central (more than 10 hurts stability)
+
+### What DID NOT help (nRF-to-nRF, SDC):
+- CI < 15ms with SDC → lower throughput (shorter CE = fewer PDUs)
+- CI > 100ms → diminishing returns + bursty behavior
+- SDC_RX_PACKET_COUNT=20 on central → throughput variance
+- 20-per-20 credit batch → credit starvation dips
+- Extra LL TX buffers on central → no improvement
 
 ## nRF-to-nRF Central Test
 
@@ -118,6 +136,11 @@ creating a credit round-trip bottleneck (~62 kbps).
 | 21a | nRF54L15 DK (CI=7.5ms) | ~1250 | Crashes after ~3s — controller can't sustain |
 | 21b | nRF54L15 DK (CI=10ms) | ~1180 | Crashes after ~3s — same issue |
 | 21c | nRF54L15 DK (CI=10ms, initial) | ~1180 | Crashes after ~3s — not CI change, fundamental limit |
+| SDC-0 | nRF54L15 DK (SDC, CI=7.5ms) | **1050** | SDC stable but short CI = low throughput |
+| SDC-5 | nRF54L15 DK (SDC, CI=50ms) | **1317** | Optimal — 92% of theoretical max |
+| SDC-6 | nRF54L15 DK (SDC, CI=100ms) | **1340** | Higher peak but variable |
+| SDC-7 | nRF54L15 DK (SDC, CI=200ms) | **1351** | Highest peak but bursty |
+| SDC-11 | nRF54L15 DK (SDC, CI=50ms, tuned) | **1317** | Rock solid — best overall |
 
 ### CI Experiment Results
 
@@ -129,21 +152,39 @@ Tested CI values below 15ms to find max throughput. **All CI < 15ms crash the ce
 | 10.0 | 8 | ~1180 | NO (3s) | Lower throughput AND crashes |
 | 7.5 | 6 | ~1250 | NO (3s) | Reason 62 at connect or crash after 3s |
 
-**Conclusion**: 15ms CI is the sweet spot. Shorter CI means shorter connection events,
-fitting fewer packets per CE, so throughput actually decreases. The Zephyr LL controller
-also hard-resets after ~3s of sustained data at CI < 15ms (likely a controller scheduling
-or buffer issue). **1285 kbps at 15ms CI is the maximum stable nRF-to-nRF throughput.**
+**Zephyr LL Conclusion**: 15ms CI is the Zephyr LL sweet spot. CI < 15ms crashes after ~3s.
+
+**SDC Conclusion**: Switching to Nordic SoftDevice Controller (SDC) enables longer CI
+values (50ms+) that pack more PDUs per connection event. SDC at 50ms CI achieves
+**1317 kbps** — a 2.5% improvement over Zephyr LL, with rock-solid stability.
+See `nrf54l15_l2cap_test_fast/THROUGHPUT_LOG.md` for full SDC optimization log.
 
 ### Build & Flash Commands
 
+Zephyr LL builds (original `_test` and `_central`):
 ```bash
-# Build central
 cd zephyr_workspace/zephyrproject
 west build -b nrf54l15dk/nrf54l15/cpuapp ../nrf54l15_l2cap_central -p
-
-# Flash central to DK #1057725401
 west flash --snr 1057725401
+```
 
-# Reset peripheral DK #1057709871
-nrfutil device reset --serial-number 1057709871
+SDC builds (`_test_fast` and `_central_fast`, require NCS):
+```bash
+cd /opt/nordic/ncs/v3.2.1
+
+# Build & flash peripheral
+nrfutil sdk-manager toolchain launch --ncs-version v3.2.1 -- \
+  west build -b nrf54l15dk/nrf54l15/cpuapp \
+  /Users/danahern/code/claude/embedded/zephyr_workspace/nrf54l15_l2cap_test_fast \
+  -d build_periph -p
+nrfutil sdk-manager toolchain launch --ncs-version v3.2.1 -- \
+  west flash -d build_periph --snr 1057709871
+
+# Build & flash central
+nrfutil sdk-manager toolchain launch --ncs-version v3.2.1 -- \
+  west build -b nrf54l15dk/nrf54l15/cpuapp \
+  /Users/danahern/code/claude/embedded/zephyr_workspace/nrf54l15_l2cap_central_fast \
+  -d build -p
+nrfutil sdk-manager toolchain launch --ncs-version v3.2.1 -- \
+  west flash -d build --snr 1057725401
 ```

@@ -17,9 +17,9 @@
 #define TARGET_NAME     "nRF54L15_Test"
 #define TARGET_NAME_LEN (sizeof(TARGET_NAME) - 1)
 
-#define SDU_LEN          492
+#define SDU_LEN          2000
 #define RX_MPS           247
-#define INITIAL_CREDITS  10
+#define INITIAL_CREDITS  80
 #define STATS_INTERVAL_MS 1000
 
 /* PSM Discovery Service UUIDs - must match peripheral */
@@ -75,14 +75,17 @@ static void l2cap_chan_disconnected(struct bt_l2cap_chan *chan)
 	l2cap_connected = false;
 }
 
+static uint32_t seg_count;
+
 static void l2cap_chan_seg_recv(struct bt_l2cap_chan *chan, size_t sdu_len,
 				off_t seg_offset, struct net_buf_simple *seg)
 {
 	rx_bytes += seg->len;
+	seg_count++;
 
-	/* Replenish 1 credit per segment to keep pipeline full */
-	if (l2cap_connected) {
-		bt_l2cap_chan_give_credits(chan, 1);
+	/* Replenish credits in batches to reduce credit PDU overhead */
+	if (l2cap_connected && (seg_count % 10 == 0)) {
+		bt_l2cap_chan_give_credits(chan, 10);
 	}
 }
 
@@ -228,16 +231,16 @@ static void ci_update_work_handler(struct k_work *work)
 	}
 
 	const struct bt_le_conn_param ci_param = {
-		.interval_min = 8,
-		.interval_max = 8,
+		.interval_min = 40,  /* 50ms */
+		.interval_max = 40,  /* 50ms */
 		.latency = 0,
 		.timeout = 400,
 	};
 	int err = bt_conn_le_param_update(current_conn, &ci_param);
 	if (err) {
-		printk("CI update to 10ms failed (err %d)\n", err);
+		printk("CI update to 15ms failed (err %d)\n", err);
 	} else {
-		printk("Requested CI update to 10ms\n");
+		printk("Requested CI update to 15ms\n");
 	}
 }
 
@@ -399,8 +402,8 @@ static void scan_cb(const bt_addr_le_t *addr, int8_t rssi,
 		.timeout = 0,
 	};
 	struct bt_le_conn_param conn_param = {
-		.interval_min = 8,
-		.interval_max = 8,
+		.interval_min = 40,  /* 50ms */
+		.interval_max = 40,  /* 50ms */
 		.latency = 0,
 		.timeout = 400,
 	};

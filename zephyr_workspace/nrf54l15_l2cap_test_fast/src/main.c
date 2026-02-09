@@ -18,8 +18,8 @@
 #define DEVICE_NAME     CONFIG_BT_DEVICE_NAME
 #define DEVICE_NAME_LEN (sizeof(DEVICE_NAME) - 1)
 
-#define SDU_LEN          492
-#define TX_BUF_COUNT     6
+#define SDU_LEN          2000
+#define TX_BUF_COUNT     10
 #define STATS_INTERVAL_MS 1000
 
 /* PSM Discovery Service UUIDs */
@@ -182,17 +182,7 @@ static void conn_param_work_handler(struct k_work *work)
 	if (err) {
 		printk("Data length update failed (err %d)\n", err);
 	}
-
-	struct bt_le_conn_param param = {
-		.interval_min = 6,
-		.interval_max = 6,
-		.latency = 0,
-		.timeout = 400,
-	};
-	err = bt_conn_le_param_update(current_conn, &param);
-	if (err) {
-		printk("Conn param update failed (err %d)\n", err);
-	}
+	/* CI is controlled by the central - don't override here */
 }
 
 static void connected(struct bt_conn *conn, uint8_t err)
