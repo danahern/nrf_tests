@@ -11,7 +11,7 @@ Requirements:
 
 Usage:
     python3 l2cap_throughput_test.py
-    python3 l2cap_throughput_test.py --name nRF54L15_L2CAP
+    python3 l2cap_throughput_test.py --name nRF54L15_Test
     python3 l2cap_throughput_test.py --duration 30
 """
 
@@ -43,7 +43,8 @@ class L2CAPThroughputTest(NSObject):
         if self is None:
             return None
 
-        self.target_name = "nRF54L15_L2CAP"
+        self.target_name = "nRF54L15_Test"
+        self.scan_timeout = 15  # seconds before giving up scan
         self.duration = 0  # 0 = run forever
         self.peripheral = None
         self.psm = None
@@ -65,6 +66,7 @@ class L2CAPThroughputTest(NSObject):
     def centralManagerDidUpdateState_(self, central):
         if central.state() == CBManagerStatePoweredOn:
             print("Bluetooth powered on, scanning...")
+            self.scan_start_time = time.time()
             central.scanForPeripheralsWithServices_options_(None, None)
         else:
             print(f"Bluetooth not available (state={central.state()})")
@@ -231,8 +233,8 @@ class L2CAPThroughputTest(NSObject):
 def main():
     parser = argparse.ArgumentParser(description="L2CAP CoC Throughput Test")
     parser.add_argument(
-        "--name", default="nRF54L15_L2CAP",
-        help="Device name to scan for (default: nRF54L15_L2CAP)"
+        "--name", default="nRF54L15_Test",
+        help="Device name to scan for (default: nRF54L15_Test)"
     )
     parser.add_argument(
         "--duration", type=int, default=0,
@@ -258,6 +260,13 @@ def main():
             run_loop.runMode_beforeDate_(
                 NSDefaultRunLoopMode, NSDate.dateWithTimeIntervalSinceNow_(0.1)
             )
+            # Timeout if scanning takes too long (prevents hanging)
+            if (test.peripheral is None
+                    and hasattr(test, 'scan_start_time')
+                    and time.time() - test.scan_start_time > test.scan_timeout):
+                print(f"\nScan timeout after {test.scan_timeout}s - device not found.")
+                print("Check that the device is powered on and advertising.")
+                sys.exit(1)
     except KeyboardInterrupt:
         print("\nStopping...")
         test._print_final_stats()

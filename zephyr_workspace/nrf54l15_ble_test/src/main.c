@@ -48,6 +48,7 @@ static uint32_t iterations = 0;
 static uint8_t test_data[TEST_DATA_SIZE];
 
 static bool notify_enabled = false;
+static volatile bool dle_ready = false;
 static struct k_work_delayable conn_param_work;
 
 
@@ -170,8 +171,11 @@ static void connected(struct bt_conn *conn, uint8_t err)
 	printk("Connected: %s\n", addr);
 	current_conn = bt_conn_ref(conn);
 
-	/* Schedule param updates after 1 second to let connection stabilize */
-	k_work_schedule(&conn_param_work, K_SECONDS(1));
+	/* Stop advertising to free radio time for data transfer */
+	bt_le_adv_stop();
+
+	/* Schedule param updates quickly */
+	k_work_schedule(&conn_param_work, K_MSEC(50));
 }
 
 static void disconnected(struct bt_conn *conn, uint8_t reason)
@@ -194,6 +198,7 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 	total_cycles = 0;
 	iterations = 0;
 	notify_enabled = false;
+	dle_ready = false;
 	target_tx_kbps = 0;  /* Reset to max speed on disconnect */
 }
 
@@ -218,6 +223,10 @@ static void le_data_len_updated(struct bt_conn *conn,
 	printk("*** Data Length updated: TX max_len=%u max_time=%u, RX max_len=%u max_time=%u ***\n",
 	       info->tx_max_len, info->tx_max_time,
 	       info->rx_max_len, info->rx_max_time);
+
+	if (info->tx_max_len >= 251) {
+		dle_ready = true;
+	}
 }
 
 static void mtu_updated(struct bt_conn *conn, uint16_t tx, uint16_t rx)
@@ -314,26 +323,17 @@ void stats_thread(void)
 
 void stream_thread(void)
 {
-	timing_t start_time, end_time;
-	uint64_t cycles;
-
 	/* Initialize test data pattern */
 	for (int i = 0; i < TEST_DATA_SIZE; i++) {
 		test_data[i] = i & 0xFF;
 	}
 
 	while (1) {
-		if (current_conn && notify_enabled) {
-			start_time = timing_counter_get();
-
+		if (current_conn && notify_enabled && dle_ready) {
 			int err = send_data(test_data, TEST_DATA_SIZE);
-
-			end_time = timing_counter_get();
-			cycles = timing_cycles_get(&start_time, &end_time);
 
 			if (err == 0) {
 				bytes_sent += TEST_DATA_SIZE;
-				total_cycles += cycles;
 				iterations++;
 			}
 

@@ -185,7 +185,7 @@ static void conn_param_work_handler(struct k_work *work)
 
 	struct bt_le_conn_param param = {
 		.interval_min = 6,
-		.interval_max = 12,
+		.interval_max = 6,
 		.latency = 0,
 		.timeout = 400,
 	};
