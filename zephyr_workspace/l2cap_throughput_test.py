@@ -47,8 +47,9 @@ class L2CAPThroughputTest(NSObject):
         self.scan_timeout = 15  # seconds before giving up scan
         self.duration = 0  # 0 = run forever
         self.peripheral = None
-        self.psm = None
-        self.l2cap_channel = None
+        self.psms = []
+        self.l2cap_channels = []
+        self.channels_opened = 0
 
         # Stats
         self.rx_bytes = 0
@@ -91,7 +92,8 @@ class L2CAPThroughputTest(NSObject):
 
     def centralManager_didDisconnectPeripheral_error_(self, central, peripheral, error):
         print(f"Disconnected: {error}")
-        self.l2cap_channel = None
+        self.l2cap_channels = []
+        self.channels_opened = 0
         self._print_final_stats()
 
     # -- CBPeripheralDelegate --
@@ -132,18 +134,26 @@ class L2CAPThroughputTest(NSObject):
             print("Invalid PSM data")
             return
 
-        self.psm = struct.unpack_from("<H", bytes(data))[0]
-        print(f"PSM = 0x{self.psm:04X} ({self.psm})")
-        print("Opening L2CAP channel...")
-        peripheral.openL2CAPChannel_(self.psm)
+        raw = bytes(data)
+        self.psms = []
+        for i in range(0, len(raw) - 1, 2):
+            psm = struct.unpack_from("<H", raw, i)[0]
+            self.psms.append(psm)
+
+        print(f"PSMs: {', '.join(f'0x{p:04X}' for p in self.psms)}")
+        print(f"Opening {len(self.psms)} L2CAP channel(s)...")
+        self.channels_opened = 0
+        for psm in self.psms:
+            peripheral.openL2CAPChannel_(psm)
 
     def peripheral_didOpenL2CAPChannel_error_(self, peripheral, channel, error):
         if error:
             print(f"L2CAP channel open error: {error}")
             return
 
-        print("L2CAP channel opened!")
-        self.l2cap_channel = channel
+        self.l2cap_channels.append(channel)
+        self.channels_opened += 1
+        print(f"L2CAP channel {self.channels_opened}/{len(self.psms)} opened!")
 
         input_stream = channel.inputStream()
         input_stream.setDelegate_(self)
@@ -152,14 +162,14 @@ class L2CAPThroughputTest(NSObject):
         )
         input_stream.open()
 
-        self.start_time = time.time()
-        self.last_report_time = self.start_time
-        self.last_report_bytes = 0
-        self.rx_bytes = 0
-        self.steady_state_time = None
-        self.steady_state_bytes = 0
-
-        print("Receiving data...")
+        if self.channels_opened == 1:
+            self.start_time = time.time()
+            self.last_report_time = self.start_time
+            self.last_report_bytes = 0
+            self.rx_bytes = 0
+            self.steady_state_time = None
+            self.steady_state_bytes = 0
+            print("Receiving data...")
 
     # -- NSStreamDelegate --
 

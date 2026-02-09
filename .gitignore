@@ -22,3 +22,6 @@ nrfutil
 **/xcuserdata/
 **/.swiftpm/
 **/project.xcworkspace/contents.xcworkspacedata
+
+# Compiled test binaries
+zephyr_workspace/l2cap_test_native

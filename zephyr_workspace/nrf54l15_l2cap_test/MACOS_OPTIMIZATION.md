@@ -47,6 +47,11 @@ macOS sends ~5 PDUs per connection event regardless of CI length.
 | TX_BUF_COUNT | 3, 6, 10 | All ~520-530 kbps |
 | ACL_TX_COUNT | 6, 10 | No difference |
 | Semaphore count | 3, 6, 10 | 6 is best (3 has slow ramp, 10 no better) |
+| Multi-channel L2CAP | 2 PSMs, 2 channels | **522 kbps** (same as 1 channel) |
+| Disable AirDrop/Handoff | Environment tuning | No measurable difference |
+
+### PDU limit is per-CE, not per-channel
+Multi-channel L2CAP (2 simultaneous CoC channels) confirmed the ~5 PDU limit is at the **radio/connection event level**, not per-channel. Two channels simply split the same ~5 PDUs between them — total throughput unchanged at ~522 kbps.
 
 ### Root cause
 macOS limits to **~5 PDUs per connection event**. At 15ms CI:
@@ -93,15 +98,19 @@ sleep 3 && cd /Users/danahern/code/claude/embedded && \
 | exp6 | Zephyr LL | 12.5ms | 492 | 6 | 6 | **284** | macOS rejects CI < 15ms |
 | confirm | Zephyr LL | 15ms | 492 | 6 | 6 | **~520** | Baseline confirmed |
 | native-swift | Zephyr LL | 15ms | 492 | 6 | 6 | **~504** | Native Swift app: same as Python |
+| multi-ch | Zephyr LL | 15ms | 492 | 6×2 | 6 | **~522** | 2 L2CAP channels: same throughput |
+| env-tune | Zephyr LL | 15ms | 492 | 6 | 6 | **~519** | AirDrop+Handoff disabled: no help |
 
 ## Conclusion
 
 **530 kbps is the hard ceiling for macOS L2CAP CoC throughput with this peripheral.**
 
 Tested exhaustively on M4 Max / macOS Tahoe 26.2:
-- 8 firmware parameter variations (CI, SDU size, buffers, controller, flow control)
+- 10 firmware parameter variations (CI, SDU size, buffers, controller, flow control, multi-channel)
 - 2 central implementations (Python PyObjC, native Swift)
+- Environment tuning (disabled AirDrop/Handoff)
 - All results: 500-530 kbps at CI=15ms, everything else is worse
 
-The bottleneck is macOS CoreBluetooth limiting to ~5 PDUs per 15ms connection event.
-No firmware or app-level optimization can change this. The original config was already optimal.
+The bottleneck is macOS CoreBluetooth limiting to **~5 PDUs per 15ms connection event**.
+This limit is **per-CE (radio level), not per-channel** — confirmed by multi-channel L2CAP test.
+No firmware, app-level, or system-level optimization can change this. The original config was already optimal.
