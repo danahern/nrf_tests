@@ -1,280 +1,146 @@
-# Alif Zephyr SDK Setup for macOS
+# Embedded BLE Testing & Power Comparison
 
-This README documents the complete setup and usage of the Alif Zephyr SDK on macOS, including building and flashing applications to Alif development boards.
+Comparative BLE testing across Nordic nRF54 and Alif Balletto B1 platforms. Measures throughput, power consumption, and energy efficiency using Nordic PPK2.
 
-## 📋 Prerequisites
+## Platforms
 
-- macOS (tested on macOS 15.0)
-- Homebrew package manager
-- Alif development board (E7, E3, E1C, or B1)
-- USB cable for programming
-- Alif Security Toolkit v1.98.3 or later
+| Platform | SoC | CPU | BLE | Status |
+|---|---|---|---|---|
+| **nRF54LM20 DK** (PCA10184) | nRF54LM20 ENGA | Cortex-M33 | BT 5.4, Zephyr BLE stack | Verified on hardware |
+| **nRF54L15 DK** (PCA10156) | nRF54L15 | Cortex-M33 | BT 5.4, Zephyr LL / SDC | Verified, 1317 kbps nRF-to-nRF |
+| **Alif B1 DK** (DK-B1) | AB1C1F4M51820 | Cortex-M55 | BLE 5.3, ROM-based stack | Firmware builds, SE recovery in progress |
 
-## 🛠️ Setup Instructions
+## Project Structure
 
-### 1. Install Dependencies
+```
+embedded/
+├── README.md                          # This file
+├── CLAUDE.md                          # Project instructions for Claude Code
+├── docs/                              # Hardware documentation (PDFs, schematics)
+│   ├── Alif_B1_Data-BRIEF_v1.5.pdf
+│   ├── DK-E1C-DK-B1-Quick-Start-v14.pdf
+│   ├── 220-00315-D_B1-DevKit_1_030526.pdf
+│   ├── AUGD0005-Alif-Security-Toolkit-User-Guide-v1.109.0-1.pdf
+│   └── nRF54LM20-DK - Hardware files 0_7_0/
+│
+├── alif_security_tools/               # Alif SETOOLS v1.109.00
+│   ├── app-release-exec-macos/        # macOS executables
+│   └── app-release-exec-linux/        # Linux x86-64 executables (for B1 A5 silicon)
+│
+├── sdk-alif/                          # Alif Zephyr SDK (west workspace, v2.1.0)
+│   ├── alif/                          # Alif samples, docs, BLE profiles
+│   ├── zephyr/                        # Alif fork of Zephyr (v4.1.0)
+│   └── modules/                       # hal_alif, mbedtls, lvgl, etc.
+│
+├── zephyr_workspace/                  # Main development workspace
+│   ├── zephyrproject/                 # Upstream Zephyr (v4.2.x) + west modules
+│   │
+│   ├── # --- Power Comparison Firmware (nRF54LM20) ---
+│   ├── nrf54lm20_idle_test/           # Deep sleep + 1s RTC wakeup
+│   ├── nrf54lm20_adv_test/            # Non-connectable BLE advertising
+│   ├── nrf54lm20_throughput_test/     # GATT notification streaming (460 kbps)
+│   ├── nrf54lm20_l2cap_test/          # L2CAP CoC streaming (434 kbps)
+│   │
+│   ├── # --- Power Comparison Firmware (Alif B1) ---
+│   ├── alif_b1_idle_test/             # STOP mode (Alif PM)
+│   ├── alif_b1_adv_test/             # BLE advertising (Alif ROM stack)
+│   ├── alif_b1_throughput_test/       # GATT notifications (Alif ROM stack)
+│   ├── alif_b1_l2cap_test/            # L2CAP CoC (Alif ROM stack)
+│   │
+│   ├── # --- Power Comparison Scripts ---
+│   ├── power_comparison/              # PPK2 measurement, analysis, QEMU tests
+│   │   ├── power_compare_test.py      # Main orchestrator (auto PPK2 + BLE central)
+│   │   ├── power_compare_analysis.py  # Side-by-side comparison report
+│   │   ├── ble_central.py             # BLE receiver (GATT + L2CAP modes)
+│   │   ├── ppk2_helper.py             # PPK2 init, measure, auto-detect
+│   │   ├── flash_helper.py            # nRF/Alif flash dispatch
+│   │   ├── platforms.py               # Platform + test mode definitions
+│   │   ├── run_all.py                 # One-command full comparison
+│   │   ├── run_qemu_test.sh           # Build + QEMU validation
+│   │   └── sim_test/                  # QEMU validation firmware (M33/M55)
+│   │
+│   ├── # --- Earlier nRF54L15 Work ---
+│   ├── nrf54l15_l2cap_test/           # L2CAP CoC peripheral (Zephyr LL)
+│   ├── nrf54l15_l2cap_test_fast/      # L2CAP CoC peripheral (SDC, 1317 kbps)
+│   ├── nrf54l15_l2cap_central_fast/   # L2CAP CoC central (SDC, nRF-to-nRF)
+│   ├── nrf54l15_ble_test/             # GATT notification peripheral
+│   │
+│   ├── # --- macOS/iOS Test Tools ---
+│   ├── l2cap_throughput_test.py       # L2CAP CoC receiver (CoreBluetooth)
+│   ├── power_throughput_test.py       # PPK2 + GATT throughput (single run)
+│   ├── power_throughput_batch.py      # PPK2 + GATT throughput (batch)
+│   ├── power_analysis.py             # Batch result analysis
+│   ├── serial_monitor.py             # Safe serial port reader
+│   └── L2CAPTest/                     # iOS Swift L2CAP test app
+│
+└── .claude/                           # Claude Code config + memory
+```
+
+## Throughput Results
+
+| Configuration | Throughput | Energy |
+|---|---|---|
+| nRF54L15 → nRF54L15 (SDC, L2CAP, 50ms CI) | **1317 kbps** | — |
+| nRF54L15 → nRF54L15 (Zephyr LL, L2CAP) | 1285 kbps | — |
+| nRF54LM20 → macOS (GATT notifications) | **460 kbps** | — |
+| nRF54LM20 → macOS (L2CAP CoC) | **434 kbps** | — |
+| nRF54L15 → macOS (GATT, 15ms CI) | ~530 kbps | 71.3 nJ/bit @ 1.8V |
+| nRF54L15 → iOS (GATT) | ~446 kbps | — |
+
+## Power Measurement
+
+Previous results (nRF54L15 with PPK2):
+
+| Voltage | Current | Power | Efficiency |
+|---|---|---|---|
+| 1.8V | 20.39 mA | 36.7 mW | 71.3 nJ/bit |
+| 3.0V | 20.44 mA | 61.3 mW | 113.2 nJ/bit |
+| 4.0V | 20.43 mA | 81.7 mW | 160.7 nJ/bit |
+
+nRF54LM20 vs Alif B1 comparison pending PPK2 hardware setup.
+
+## Build Requirements
+
+### nRF54LM20
 
 ```bash
-# Install Homebrew dependencies
-brew install python3 git wget cmake ninja
-
-# Create Python virtual environment
-python3 -m venv ~/zephyr-venv
-
-# Activate virtual environment
-source ~/zephyr-venv/bin/activate
-
-# Install Python packages
-python3 -m pip install west pyelftools
+# From zephyr_workspace/zephyrproject/
+west build -b nrf54lm20dk/nrf54lm20a/cpuapp ../nrf54lm20_throughput_test -d ../nrf54lm20_throughput_test/build -p
 ```
 
-### 2. Download and Setup Zephyr SDK
+### Alif B1
+
+Requires separate Alif Zephyr SDK workspace and `gnuarmemb` toolchain:
 
 ```bash
-# Download Zephyr SDK v0.16.5 for macOS
-wget https://github.com/zephyrproject-rtos/sdk-ng/releases/download/v0.16.5/zephyr-sdk-0.16.5_macos-x86_64_minimal.tar.xz
-
-# Extract the SDK
-tar -xf zephyr-sdk-0.16.5_macos-x86_64_minimal.tar.xz
-
-# Setup the ARM toolchain
-cd zephyr-sdk-0.16.5
-./setup.sh -t arm-zephyr-eabi -h -c
-cd ..
+# From sdk-alif/
+GNUARMEMB_TOOLCHAIN_PATH=/opt/homebrew ZEPHYR_TOOLCHAIN_VARIANT=gnuarmemb \
+  west build -b alif_b1_dk/ab1c1f4m51820hh0/rtss_he ../zephyr_workspace/alif_b1_throughput_test \
+  -d ../zephyr_workspace/alif_b1_throughput_test/build -p
 ```
 
-### 3. Fetch Alif Zephyr SDK Source
+Note: Alif BLE uses a custom ROM-based stack (`alif_ble.h`, `gapm`, `gatt_srv`), not standard Zephyr BLE APIs.
+
+### QEMU Validation
 
 ```bash
-# Create and initialize West workspace
-mkdir sdk-alif
-cd sdk-alif
-west init -m https://github.com/alifsemi/sdk-alif.git --mr main
-
-# Update all repositories (this may take several minutes)
-west update
+cd zephyr_workspace/power_comparison
+./run_qemu_test.sh
 ```
 
-### 4. Download Alif Security Toolkit
+Builds all firmware and runs validation on QEMU Cortex-M33 (mps2-an521) and Cortex-M55 (mps3-an547).
 
-- Download the Alif Security Toolkit from: https://alifsemi.com/download/APFW0002
-- Extract to `~/code/app-release-exec-macos/`
-- Ensure version is 1.98.3 or later
+## Hardware Assignment
 
-## 🚀 Building Applications
+| Role | Device | Serial # |
+|---|---|---|
+| nRF54LM20 DK | PCA10184 | 1051849098 |
+| nRF54L15 Peripheral (TX) | PCA10156 | 1057709871 |
+| nRF54L15 Central (RX) | PCA10156 | 1057725401 |
+| Alif B1 DK | DK-B1 Rev C (A5) | 1219169773 |
 
-### Activate Environment
+## Known Issues
 
-Always start by activating the Python virtual environment:
-
-```bash
-source ~/zephyr-venv/bin/activate
-cd ~/code/sdk-alif/zephyr
-```
-
-### Build Hello World Application
-
-#### For MRAM (Default - Recommended)
-```bash
-west build -b alif_e7_dk_rtss_he samples/hello_world
-```
-
-#### For ITCM
-```bash
-west build -b alif_e7_dk_rtss_he samples/hello_world \
-  -DCONFIG_FLASH_BASE_ADDRESS=0 \
-  -DCONFIG_FLASH_LOAD_OFFSET=0 \
-  -DCONFIG_FLASH_SIZE=256
-```
-
-#### Other Supported Targets
-- `alif_e7_dk_rtss_he` - E7 High Efficiency core
-- `alif_e7_dk_rtss_hp` - E7 High Performance core
-- `alif_e3_dk_rtss_he` - E3 High Efficiency core
-- `alif_e3_dk_rtss_hp` - E3 High Performance core
-- `alif_e1c_dk_rtss_he` - E1C High Efficiency core
-- `alif_b1_dk_rtss_he` - B1 High Efficiency core
-
-### Build Output
-
-Successful builds produce:
-- `build/zephyr/zephyr.bin` - Binary ready for flashing
-- `build/zephyr/zephyr.elf` - ELF file with debug symbols
-- Memory usage report showing flash and RAM consumption
-
-## 📱 Flashing Applications
-
-### 1. Prepare Application for Flashing
-
-```bash
-# Navigate to security toolkit directory
-cd ~/code/app-release-exec-macos
-
-# Copy the built binary
-cp ~/code/sdk-alif/zephyr/build/zephyr/zephyr.bin build/images/zephyr_e7_rtsshe_helloworld.bin
-```
-
-### 2. Create Configuration File
-
-Create `build/config/zephyr_e7_rtsshe_helloworld.json`:
-
-```json
-{
-  "DEVICE": {
-    "disabled": false,
-    "binary": "app-device-config.json",
-    "version": "0.5.00",
-    "signed": true
-  },
-  "Zephyr-RTSS-HE": {
-    "binary": "zephyr_e7_rtsshe_helloworld.bin",
-    "version": "1.0.0",
-    "cpu_id": "M55_HE",
-    "mramAddress": "0x80000000",
-    "flags": ["boot"],
-    "signed": false
-  }
-}
-```
-
-For ITCM configuration, replace `"mramAddress": "0x80000000"` with:
-```json
-"loadAddress": "0x58000000",
-"flags": ["load", "boot"]
-```
-
-### 3. Generate ATOC Image
-
-```bash
-./app-gen-toc -f build/config/zephyr_e7_rtsshe_helloworld.json
-```
-
-### 4. Flash to Device
-
-```bash
-# Connect your development board via USB
-# Flash the application
-./app-write-mram -p
-
-# When prompted, select the USB port (typically /dev/cu.usbmodemXXXXXX)
-```
-
-### 5. Connect Serial Console
-
-```bash
-# Connect to serial console (replace with your actual port)
-screen /dev/cu.usbmodemXXXXXX 115200
-
-# Press reset button on development board
-```
-
-Expected output:
-```
-*** Booting Zephyr OS build zas-v1.2-178-g14a30a93eb0b ****
-Hello World ! alif_e7_devkit
-```
-
-## 📁 Directory Structure
-
-```
-~/code/
-├── sdk-alif/                    # Alif Zephyr SDK workspace
-│   ├── zephyr/                  # Main Zephyr repository
-│   ├── modules/                 # HAL and other modules
-│   ├── bootloader/              # MCUboot bootloader
-│   └── alif/                    # Alif-specific configurations
-├── app-release-exec-macos/      # Alif Security Toolkit
-│   ├── app-gen-toc*             # ATOC generation tool
-│   ├── app-write-mram*          # Flash programming tool
-│   └── build/                   # Build artifacts
-├── zephyr-sdk-0.16.5/           # Zephyr SDK toolchain
-└── ~/zephyr-venv/               # Python virtual environment
-```
-
-## 🔧 Troubleshooting
-
-### Build Issues
-
-1. **CMake not found**: Ensure cmake is installed via Homebrew
-2. **Toolchain issues**: Verify Zephyr SDK setup completed successfully
-3. **Python module errors**: Check virtual environment is activated
-
-### Flashing Issues
-
-1. **Port not found**: Check USB connection and try different ports
-2. **Permission denied**: Run `sudo usermod -a -G dialout $USER` (may need to log out/in)
-3. **Device not detected**: Press reset button on development board
-4. **Flash size warnings**: Add `-p` flag to pad binary to required size
-
-### Serial Console Issues
-
-1. **No output**: Check baud rate (115200) and correct port
-2. **Garbled text**: Verify UART configuration matches (8N1)
-3. **Connection refused**: Close other terminal applications using the port
-
-## 📚 Additional Resources
-
-- [Alif Semiconductor Documentation](https://alifsemi.com/download/APFW0002)
-- [Zephyr Project Documentation](https://docs.zephyrproject.org/)
-- [West Tool Guide](https://docs.zephyrproject.org/latest/develop/west/index.html)
-
-## 🏗️ Development Workflow
-
-### Daily Development
-
-```bash
-# 1. Activate environment
-source ~/zephyr-venv/bin/activate
-
-# 2. Navigate to project
-cd ~/code/sdk-alif/zephyr
-
-# 3. Build your application
-west build -b alif_e7_dk_rtss_he samples/your_app
-
-# 4. Flash to device
-cd ~/code/app-release-exec-macos
-cp ~/code/sdk-alif/zephyr/build/zephyr/zephyr.bin build/images/your_app.bin
-# Update JSON config file as needed
-./app-gen-toc -f build/config/your_app.json
-./app-write-mram -p
-```
-
-### Exploring Samples
-
-The SDK includes many sample applications in `~/code/sdk-alif/zephyr/samples/`:
-
-- `basic/blinky` - LED blinking example
-- `drivers/gpio` - GPIO driver examples
-- `net/` - Networking examples
-- `bluetooth/` - Bluetooth LE examples
-- `sensor/` - Sensor interface examples
-
-### Memory Configurations
-
-| Configuration | RTSS-HE Address | RTSS-HP Address | Use Case |
-|---------------|-----------------|-----------------|----------|
-| MRAM (default)| 0x80000000     | 0x80200000      | Production apps |
-| ITCM          | 0x58000000     | 0x50000000      | Fast execution |
-
-## 📝 Notes
-
-- Always use the virtual environment when working with Zephyr
-- The security toolkit version should be 1.98.3 or later
-- MRAM configuration is recommended for most applications
-- Press reset button after flashing to start the application
-- Serial console uses 115200 baud, 8N1 configuration
-
-## 🆘 Getting Help
-
-If you encounter issues:
-
-1. Check this README for troubleshooting steps
-2. Verify all prerequisites are installed
-3. Ensure development board is properly connected
-4. Review the Alif Security Toolkit User Guide
-5. Consult Zephyr documentation for framework-specific issues
-
----
-
-*Setup completed and tested on macOS 15.0 with Alif E7 development kit.*
+- **Alif B1 SE unresponsive**: The Secure Enclave on the B1 DK doesn't respond to ISP commands via SE-UART at any baud rate, and J-Link SWD can't connect to any core. Recovery investigation in progress.
+- **Alif SETOOLS macOS**: macOS tools can generate TOC for B1 but may not produce correctly signed images. Linux SETOOLS v1.109 required (run via OrbStack/Docker with `--platform linux/amd64`).
+- **nRF54LM20 ENGA silicon**: Engineering sample — power characteristics may differ from production.
