@@ -1,0 +1,20 @@
+/*
+ * M33 companion overlay: force CLK_HF12 to run at 25 MHz.
+ *
+ * The demo uses external 24 MHz oscillator via CLKPATH4 → CLK_HF12, which
+ * feeds the MIPI-DSI D-PHY PLL reference. Zephyr's board DTS sets HF12 to
+ * CLKPATH4 too, but the path_mux4 source defaults to no running clock →
+ * HF12 = 0 Hz → D-PHY PLL never locks → cy_mipi_dsi_dphy_enable() waits
+ * forever in its unbounded PHY_LOCK polling loop.
+ *
+ * Fix: route CLK_HF12 to CLKPATH0 (DPLL_LP0 = 400 MHz) with divide-by-16
+ * to get 25 MHz — close enough to 24 MHz for the D-PHY PLL lock range.
+ */
+
+#include <zephyr/dt-bindings/clock/ifx_clock_source_common.h>
+
+&clk_hf12 {
+	source-path = <IFX_CLK_HF_IN_CLKPATH0>;
+	clock-div = <IFX_CLK_HF_DIVIDE_BY_16>;
+	status = "okay";
+};
