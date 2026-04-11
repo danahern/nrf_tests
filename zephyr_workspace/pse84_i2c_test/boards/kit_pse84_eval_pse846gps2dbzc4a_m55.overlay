@@ -1,0 +1,71 @@
+#include <zephyr/dt-bindings/display/panel.h>
+
+/* I2C on SCB0 — used by the Waveshare 4.3" panel MCU at 0x45 */
+&p8_0_scb0_i2c_scl {
+	drive-open-drain;
+	input-enable;
+};
+
+&p8_1_scb0_i2c_sda {
+	drive-open-drain;
+	input-enable;
+};
+
+&peri0_group1_16bit_1 {
+	status = "okay";
+	clock-div = <32>;
+};
+
+i2c0: &scb0 {
+	compatible = "infineon,i2c";
+	status = "okay";
+	clock-frequency = <100000>;
+	#address-cells = <1>;
+	#size-cells = <0>;
+	clocks = <&peri0_group1_16bit_1>;
+	pinctrl-0 = <&p8_0_scb0_i2c_scl &p8_1_scb0_i2c_sda>;
+	pinctrl-names = "default";
+
+	waveshare_4p3: waveshare_4p3@45 {
+		compatible = "waveshare,dsi-4p3-mcu";
+		reg = <0x45>;
+		default-brightness = <255>;
+		status = "okay";
+	};
+};
+
+/* GFXSS display controller — 800x480 Waveshare 4.3" panel.
+ * Uses 832 layer stride for 128-byte alignment in RGB565; the panel's
+ * bridge chip handles the 832→800 width conversion. Framebuffer lives at
+ * 0x26240000 in SOCMEM. */
+&gfxss {
+	status = "okay";
+	width = <832>;
+	height = <480>;
+	pixel-format = <PANEL_PIXEL_FORMAT_RGB_565>;
+	framebuffer = <0x26240000 0xC3300>; /* 832*480*2 = 798720 bytes */
+	num-lanes = <1>;
+	per-lane-mbps = <810>;
+	pixel-clock-khz = <33768>;
+	hsync-width = <10>;
+	hfp = <210>;
+	hbp = <20>;
+	vsync-width = <5>;
+	vfp = <20>;
+	vbp = <20>;
+	panel = <&waveshare_4p3>;
+};
+
+/ {
+	chosen {
+		zephyr,display = &gfxss;
+	};
+};
+
+&gpio_prt20 {
+	status = "okay";
+};
+
+&gpio_prt21 {
+	status = "okay";
+};

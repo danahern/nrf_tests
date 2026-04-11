@@ -1,0 +1,38 @@
+/* RRAM boot */
+&m33s_header { reg = <0x22011000 0x400>; };
+&m33s_xip { reg = <0x32011400 DT_SIZE_K(356)>; };
+/ { chosen { zephyr,flash = &m33s_xip; }; };
+
+/* I2C — copy PSoC6 minimal pattern */
+&p8_0_scb0_i2c_scl {
+	drive-open-drain;
+	input-enable;
+};
+
+&p8_1_scb0_i2c_sda {
+	drive-open-drain;
+	input-enable;
+};
+
+i2c0: &scb0 {
+	compatible = "infineon,i2c";
+	status = "okay";
+	#address-cells = <1>;
+	#size-cells = <0>;
+	clocks = <&peri0_group1_16bit_1>;
+	pinctrl-0 = <&p8_0_scb0_i2c_scl &p8_1_scb0_i2c_sda>;
+	pinctrl-names = "default";
+};
+
+&peri0_group1_16bit_1 {
+	status = "okay";
+	clock-div = <32>;
+};
+
+&gpio_prt20 {
+	status = "okay";
+};
+
+&gpio_prt21 {
+	status = "okay";
+};
