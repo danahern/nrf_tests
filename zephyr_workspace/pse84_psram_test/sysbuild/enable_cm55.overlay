@@ -1,0 +1,7 @@
+#include <zephyr/dt-bindings/clock/ifx_clock_source_common.h>
+
+&clk_hf12 {
+	source-path = <IFX_CLK_HF_IN_CLKPATH0>;
+	clock-div = <IFX_CLK_HF_DIVIDE_BY_16>;
+	status = "okay";
+};
