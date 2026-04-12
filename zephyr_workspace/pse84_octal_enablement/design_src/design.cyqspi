@@ -24,7 +24,7 @@
         <SlotConfig>
             <SlaveSlot>1</SlaveSlot>
             <MemoryId>Not used</MemoryId>
-            <MemoryMapped>true</MemoryMapped>
+            <MemoryMapped>false</MemoryMapped>
             <DualQuad>None</DualQuad>
             <StartAddress>0x60000000</StartAddress>
             <Size>0x1000000</Size>
