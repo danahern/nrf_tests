@@ -41,7 +41,7 @@ i2c0: &scb0 {
 	waveshare_4p3: waveshare_4p3@45 {
 		compatible = "waveshare,dsi-4p3-mcu";
 		reg = <0x45>;
-		default-brightness = <255>;
+		/* default-brightness falls through to binding default (128 = 50%) */
 		/* Panel MCU needs DSI link up before it responds on I2C;
 		 * let the GFXSS driver trigger init via device_init() after
 		 * its own Cy_GFXSS_Init and a stabilization delay.
