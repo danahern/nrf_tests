@@ -164,18 +164,17 @@ dmic_dev: &dmic0 {
 };
 
 /*
- * Phase 2: bump console UART baud so the 64 KB hex PCM dump (2 s mono
+ * Phase 2: console UART baud for the 64 KB hex PCM dump path (2 s mono
  * 16-bit @ 16 kHz → 64 KB raw → ~128 KB as 2-char-per-byte hex + line
- * breaks) finishes in ~1.5 s instead of the 11 s it would take at
- * 115200. The kit's CDC bridge chip (KitProg3) advertises a 1 Mbaud
- * ceiling; we use 921600 (Zephyr-standard high-speed value the user
- * directive pins us to) as a safe point below that ceiling.
- *
- * The CAT1 SCB UART clock divider has 10 % tolerance (see
- * drivers/serial/uart_infineon_pdl.c IFX_UART_MAX_BAUD_PERCENT_DIFFERENCE)
- * and the default peri0_group1_16bit_0 clock-div=1 gives plenty of
- * headroom to hit 921600 cleanly on hfclk0 (~100 MHz).
+ * breaks). 460800 finishes the dump in ~3 s — fast enough, and proven
+ * clean end-to-end on the KitProg3 CDC bridge. 921600 was attempted
+ * first but showed ~45 % byte-level corruption during sustained bursts,
+ * consistent with the CAT1 SCB UART driver accepting up to 10 % baud
+ * drift (IFX_UART_MAX_BAUD_PERCENT_DIFFERENCE in uart_infineon_pdl.c)
+ * plus KitProg3's own CDC quirks. If Phase 4 L2CAP throughput probes
+ * need higher rates, tune peri0_group1_16bit_0 clock-div for an
+ * integer divider at the target baud, or switch to an RTT backend.
  */
 &uart2 {
-	current-speed = <921600>;
+	current-speed = <460800>;
 };

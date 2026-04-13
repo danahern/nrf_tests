@@ -11,9 +11,8 @@ On each complete frame, decodes the hex payload, writes a WAV file to
 captures/<timestamp>.wav, prints a summary, and autoplays via afplay
 (macOS) / aplay (Linux).
 
-Uses only the stdlib (+ pyserial at runtime for the HW path). The
-codec/hex/WAV path is pure stdlib so the unit tests can exercise it
-without any serial hardware.
+The parser itself lives in :mod:`uart_protocol` so other host tools
+(the assistant bridge) can reuse it. This module is a thin CLI on top.
 
 Requires: pip install pyserial
 """
@@ -21,95 +20,40 @@ Requires: pip install pyserial
 from __future__ import annotations
 
 import argparse
-import glob
-import os
 import platform
-import re
-import struct
 import subprocess
 import sys
 import time
 import wave
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Iterator, Optional
+from typing import Iterator, Optional
 
-BEGIN_RE = re.compile(
-    r"=== PCM_BEGIN samples=(?P<samples>\d+) sample_rate=(?P<sr>\d+) "
-    r"channels=(?P<ch>\d+) bits=(?P<bits>\d+) ==="
+from uart_protocol import (
+    BEGIN_RE,
+    END_MARKER,
+    HEX_RE,
+    PcmFrame,
+    find_serial_port,
+    iter_captures,
+    iter_captures_from_serial,
+    parse_frame,
 )
-END_MARKER = "=== PCM_END ==="
-HEX_RE = re.compile(r"^[0-9a-fA-F]+$")
 
 
-@dataclass
-class PcmFrame:
-    """A captured PCM frame."""
-
-    samples: int
-    sample_rate: int
-    channels: int
-    bits: int
-    pcm: bytes  # little-endian signed int16 interleaved
-
-    @property
-    def duration_ms(self) -> float:
-        return 1000.0 * self.samples / self.sample_rate
-
-    def peak(self) -> int:
-        """Absolute peak amplitude (signed 16-bit assumed)."""
-        peak = 0
-        # struct iter is faster than decoding one at a time.
-        for (s,) in struct.iter_unpack("<h", self.pcm):
-            a = -s if s < 0 else s
-            if a > peak:
-                peak = a
-        return peak
-
-
-def parse_frame(lines: Iterable[str]) -> Optional[PcmFrame]:
-    """Parse a complete frame from an iterable of lines.
-
-    Lines must NOT include trailing newlines. Returns None if no valid
-    frame is found; raises ValueError on a malformed frame.
-    """
-    it = iter(lines)
-    header: Optional[re.Match[str]] = None
-    for line in it:
-        m = BEGIN_RE.search(line)
-        if m:
-            header = m
-            break
-    if header is None:
-        return None
-
-    samples = int(header.group("samples"))
-    sr = int(header.group("sr"))
-    ch = int(header.group("ch"))
-    bits = int(header.group("bits"))
-    expected_hex_chars = 2 * samples * ch * (bits // 8)
-
-    hex_chunks: list[str] = []
-    found_end = False
-    for line in it:
-        stripped = line.strip()
-        if stripped == END_MARKER:
-            found_end = True
-            break
-        # Tolerate interleaved log noise on the same UART — skip lines
-        # that aren't pure hex.
-        if HEX_RE.match(stripped):
-            hex_chunks.append(stripped)
-    if not found_end:
-        raise ValueError("PCM_BEGIN seen but no matching PCM_END")
-
-    hex_payload = "".join(hex_chunks)
-    if len(hex_payload) != expected_hex_chars:
-        raise ValueError(
-            f"expected {expected_hex_chars} hex chars, got {len(hex_payload)}"
-        )
-    pcm = bytes.fromhex(hex_payload)
-    return PcmFrame(samples=samples, sample_rate=sr, channels=ch, bits=bits, pcm=pcm)
+# Re-exports for the existing test suite / callers that historically
+# reached into receive_pcm for these names.
+__all__ = [
+    "BEGIN_RE",
+    "END_MARKER",
+    "HEX_RE",
+    "PcmFrame",
+    "parse_frame",
+    "write_wav",
+    "autoplay",
+    "find_serial_port",
+    "stream_frames_from_serial",
+    "main",
+]
 
 
 def write_wav(frame: PcmFrame, path: Path) -> None:
@@ -138,48 +82,15 @@ def autoplay(path: Path) -> None:
         print(f"(autoplay skipped: {cmd[0]} not installed)")
 
 
-def find_serial_port(pattern: str) -> Optional[str]:
-    matches = sorted(glob.glob(pattern))
-    return matches[0] if matches else None
-
-
 def stream_frames_from_serial(port: str, baud: int) -> Iterator[PcmFrame]:
-    """Generator: yield one PcmFrame per captured burst."""
-    import serial  # local import so the unit tests don't need pyserial
+    """Generator: yield one :class:`PcmFrame` per captured burst.
 
-    with serial.Serial(port, baudrate=baud, timeout=1) as ser:
-        print(f"listening on {port} @ {baud} baud (Ctrl-C to stop)")
-        buf: list[str] = []
-        in_frame = False
-        while True:
-            raw = ser.readline()
-            if not raw:
-                continue
-            try:
-                line = raw.decode("ascii", errors="replace").rstrip("\r\n")
-            except Exception:
-                continue
-            if BEGIN_RE.search(line):
-                buf = [line]
-                in_frame = True
-                continue
-            if in_frame:
-                buf.append(line)
-                if line.strip() == END_MARKER:
-                    try:
-                        frame = parse_frame(buf)
-                    except ValueError as exc:
-                        print(f"frame parse error: {exc}")
-                        in_frame = False
-                        buf = []
-                        continue
-                    in_frame = False
-                    buf = []
-                    if frame is not None:
-                        yield frame
-            else:
-                # Print stray output so the user can still see HW logs.
-                print(f"  | {line}")
+    Thin wrapper around :func:`uart_protocol.iter_captures_from_serial`
+    that also prints a connection banner, matching the previous CLI
+    behavior.
+    """
+    print(f"listening on {port} @ {baud} baud (Ctrl-C to stop)")
+    yield from iter_captures_from_serial(port, baud)
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -189,7 +100,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         default=None,
         help="serial device (default: auto-glob /dev/cu.usbmodem*)",
     )
-    p.add_argument("--baud", type=int, default=921600)
+    p.add_argument("--baud", type=int, default=460800)
     p.add_argument(
         "--out-dir",
         type=Path,
