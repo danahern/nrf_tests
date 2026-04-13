@@ -1,0 +1,3 @@
+[submodule "zephyr_workspace/modules/libopus/opus"]
+	path = zephyr_workspace/modules/libopus/opus
+	url = https://github.com/xiph/opus.git

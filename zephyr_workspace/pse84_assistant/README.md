@@ -79,6 +79,59 @@ banner via the emulated UART but SDL display init fails without a
 display server. For visual verification use Option A or add X
 forwarding (Linux VM / XQuartz + network X).
 
+## Running tests (twister, native_sim)
+
+The `tests/` tree carries Ztest suites exercised from the Docker-based CI
+container so the host toolchain mismatch doesn't matter. Both suites run
+on `native_sim/native/64`.
+
+```bash
+docker run --rm \
+    -v "$HOME/code/claude:$HOME/code/claude" \
+    -w "$PWD" -e HOME=/tmp \
+    -e ZEPHYR_SDK_INSTALL_DIR=/opt/toolchains/zephyr-sdk-1.0.1 \
+    ghcr.io/zephyrproject-rtos/ci:v0.29.1 \
+    bash -lc 'source zephyr_workspace/zephyrproject/zephyr/zephyr-env.sh && \
+        west twister -p native_sim/native/64 \
+            -T zephyr_workspace/pse84_assistant/tests --inline-logs'
+```
+
+Suites:
+
+- `tests/framing/` — pure-C `src/framing.c` coverage: encode/decode
+  round-trip, streaming parser (partial SDUs, multiple frames per
+  feed, mid-frame splits, unknown-type resync), bad-args handling.
+  Mirrors `host/assistant_bridge/tests/test_framing.py` so the wire
+  format is verified from both ends. **No libopus submodule required.**
+- `tests/opus_roundtrip/` — instantiates `src/opus_wrapper.c` with
+  CONFIG_OPUS=y, feeds a 1 kHz sine @ 16 kHz through encode → decode,
+  asserts RMS energy is preserved (0.5x – 2x) after a 600 ms warm-up
+  window. Requires the `zephyr_workspace/modules/libopus/opus`
+  submodule to be initialised (`git submodule update --init --recursive`).
+
+### Opus module (Track C)
+
+libopus (xiph/opus, pinned to v1.5.2) is vendored under
+`zephyr_workspace/modules/libopus/` as a Zephyr out-of-tree module. The
+app `CMakeLists.txt` registers it via `ZEPHYR_EXTRA_MODULES` so no
+patching of `zephyrproject/zephyr/west.yml` is required. Build options
+force `FIXED_POINT=1` + `DISABLE_FLOAT_API` — no FPU dependency, and
+both encoder and decoder are always present so the v3 TTS path can
+reuse the same build.
+
+- **CONFIG_OPUS=n (default)**: the `opus` INTERFACE target exists but
+  contributes no sources; `opus_wrap_*` entry points return `-ENOTSUP`.
+  The pse84_assistant HW + native_sim builds do not require the
+  submodule to be checked out.
+- **CONFIG_OPUS=y**: pulls the vendored sources and compiles in ~60
+  Opus TUs. Roughly 450 KB flash on M55.
+
+Initialise the submodule if you need the real codec:
+
+```bash
+git submodule update --init --recursive zephyr_workspace/modules/libopus/opus
+```
+
 ### Behavior gaps vs. HW (for Tracks A and C)
 
 - **Display resolution**: native_sim's SDL display defaults to 320×240

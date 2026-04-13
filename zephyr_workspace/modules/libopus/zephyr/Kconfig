@@ -1,0 +1,25 @@
+# libopus Zephyr module.
+#
+# Vendored under zephyr_workspace/modules/libopus/opus (git submodule pinned
+# to upstream xiph/opus v1.5.2). Fixed-point only; float API disabled.
+
+config ZEPHYR_LIBOPUS_MODULE
+	bool
+
+menuconfig OPUS
+	bool "libopus (fixed-point)"
+	help
+	  Enable the libopus codec. Build is forced to fixed-point with the
+	  float API disabled to avoid pulling an FPU dependency. Targets
+	  16 kHz mono speech @ ~16 kbps for the PSE84 voice-assistant app.
+	  When disabled the module adds no sources and the library symbol
+	  `opus` still exists as an INTERFACE target so apps can
+	  unconditionally `target_link_libraries(app PRIVATE opus)`.
+
+if OPUS
+
+config OPUS_CUSTOM_MODES
+	bool "Enable custom modes (non-standard sample rates)"
+	default n
+
+endif # OPUS

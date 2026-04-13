@@ -1,0 +1,15 @@
+common:
+  tags:
+    - pse84_assistant
+    - opus
+  platform_allow:
+    - native_sim
+    - native_sim/native/64
+  integration_platforms:
+    - native_sim
+    - native_sim/native/64
+  # libopus TUs emit a lot of benign warnings that do not deserve a test
+  # failure.
+  build_only: false
+tests:
+  pse84_assistant.opus_roundtrip: {}

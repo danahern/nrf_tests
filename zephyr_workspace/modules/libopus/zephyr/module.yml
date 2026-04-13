@@ -1,0 +1,4 @@
+name: libopus
+build:
+  cmake: .
+  kconfig: zephyr/Kconfig
