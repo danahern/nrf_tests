@@ -102,7 +102,12 @@ static int audio_configure(void)
 	 * overlay which enables dmic0_ch2 with use-alt-io). Sample uses
 	 * the same pair, taking channel 2 as LEFT.
 	 */
-	cfg.channel.req_chan_map_lo = dmic_build_channel_map(0, 1, PDM_CHAN_LEFT);
+	/* PDM_CHAN_RIGHT: kit_pse84_eval onboard mic drives data on the
+	 * rising clock edge (SEL=VDD), so the LEFT half reads all zeros.
+	 * Together with fir0-enable on dmic0_ch2 in the overlay this turns
+	 * "silence with DC transient" / "peak=0 silence" into real audio.
+	 */
+	cfg.channel.req_chan_map_lo = dmic_build_channel_map(0, 1, PDM_CHAN_RIGHT);
 	stream.pcm_rate = AUDIO_SAMPLE_RATE_HZ;
 	stream.block_size = AUDIO_BLOCK_BYTES;
 

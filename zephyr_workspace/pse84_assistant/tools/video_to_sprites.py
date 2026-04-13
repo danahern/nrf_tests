@@ -81,14 +81,31 @@ def run(cmd: list[str]) -> None:
 
 
 def extract_frames(src_mp4: Path, w: int, h: int, fps: int,
-                   duration: float) -> bytes:
-    """ffmpeg -> raw rgb565be frames, letterboxed to WxH, fps fixed, duration capped."""
-    # scale to fit + pad to exact WxH (letterbox), force pix_fmt rgb565be.
-    vf = (
-        f"scale=w={w}:h={h}:force_original_aspect_ratio=decrease,"
-        f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=black,"
-        f"fps={fps}"
-    )
+                   duration: float, rotate: str = "cw") -> bytes:
+    """ffmpeg -> raw rgb565le frames, letterboxed to WxH, fps fixed, duration capped.
+
+    rotate: "cw" (90 degrees clockwise, default — for kits held in portrait
+    tilted-right), "ccw" (90 degrees counterclockwise), or "none" (no
+    rotation, native-landscape content). The PSE84 display panel is
+    physically landscape (800x480); pre-rotating here lets the kit be
+    held in portrait with the character appearing upright without needing
+    GFXSS rotation or LVGL software-rotate (which would cost a full
+    framebuffer copy every sprite frame).
+    """
+    # scale to fit + pad to exact WxH (letterbox), force pix_fmt rgb565le.
+    filters = []
+    if rotate == "cw":
+        filters.append("transpose=1")
+    elif rotate == "ccw":
+        filters.append("transpose=2")
+    elif rotate != "none":
+        raise SystemExit(f"unknown rotate value: {rotate!r}")
+    filters.extend([
+        f"scale=w={w}:h={h}:force_original_aspect_ratio=decrease",
+        f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=black",
+        f"fps={fps}",
+    ])
+    vf = ",".join(filters)
     cmd = [
         "ffmpeg", "-y", "-loglevel", "error",
         "-i", str(src_mp4),
@@ -191,7 +208,7 @@ def emit_source(dst: Path, prefix: str, records: list[FrameRec],
 
 
 def process_tier(tier: str, src_root: Path, out_root: Path,
-                 fps: int, duration: float) -> int:
+                 fps: int, duration: float, rotate: str = "cw") -> int:
     w, h = TIERS[tier]
     frame_bytes = w * h * 2
     total = 0
@@ -203,7 +220,7 @@ def process_tier(tier: str, src_root: Path, out_root: Path,
         dst_dir = out_root / state_dir
         dst_dir.mkdir(parents=True, exist_ok=True)
 
-        raw = extract_frames(src, w, h, fps, duration)
+        raw = extract_frames(src, w, h, fps, duration, rotate=rotate)
         blob, recs = compress_frames(raw, frame_bytes)
 
         emit_bin_inc(dst_dir / "frames.bin.inc", blob)
@@ -230,6 +247,10 @@ def main() -> int:
     p.add_argument("--duration", type=float, default=DEFAULT_DURATION)
     p.add_argument("--force-tier", choices=["A", "B"], default=None,
                    help="Skip auto budget check; use this tier only.")
+    p.add_argument("--rotate", choices=["cw", "ccw", "none"], default="cw",
+                   help="Pre-rotate frames so the kit can be held in portrait "
+                        "(default: cw, 90deg clockwise — compensates for the "
+                        "landscape 800x480 panel being tilted 90deg right).")
     args = p.parse_args()
 
     if not shutil.which("ffmpeg"):

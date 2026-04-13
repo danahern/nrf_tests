@@ -11,7 +11,7 @@
  * signing pipeline.
  */
 &m55_xip {
-	reg = <0x60500000 DT_SIZE_M(24)>;
+	reg = <0x60500000 DT_SIZE_M(40)>;
 };
 
 /* I2C on SCB0 — used by the Waveshare 4.3" panel MCU at 0x45 */
@@ -180,6 +180,18 @@ dmic_dev: &dmic0 {
 &dmic0_ch2 {
 	status = "okay";
 	use-alt-io;
+	/*
+	 * fir0-enable is MANDATORY at 16 kHz — the DT binding says
+	 * "Disabled by default and typically only used for sample
+	 * frequencies of 8 and 16 kHz" (dts/bindings/audio/infineon,pdm.yaml).
+	 * Driver defaults w/ fir0_enable=true: CIC /32, FIR0 /1 scale 0,
+	 * FIR1 /2 scale 15 → total /64. With PDM clk ≈ 1.024 MHz this
+	 * yields the requested 16 kHz PCM rate. Without fir0-enable the
+	 * channel outputs un-decimated CIC data and produces a huge DC
+	 * transient followed by silence — the "peak=27842 every capture,
+	 * tail all -1" signature.
+	 */
+	fir0-enable;
 };
 
 /*
