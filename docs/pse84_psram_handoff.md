@@ -1,6 +1,6 @@
 # PSE84 PSRAM (S70KS1283 HyperRAM on SMIF1/CS2) — Debug Hand-Off
 
-**Status as of 2026-04-12:** M33-side XIP works (proven). CM55-side XIP at 0x64000000 bus-faults and the cause is not yet identified despite exhausting every documented knob.
+**Status as of 2026-04-12 (updated end-of-session):** M33-side SMIF1 init is NOT working in the current tree. Original handoff claim "M33 side reliably working" was stale. See §13 for the session log — two latent bugs in the init path were fixed (commit `bc3a58bfdb9` on zephyr submodule `pse84-gfxss-display-driver`), but init now hangs inside SMIF PDL calls, triggering SMIF1 stuck-busy (chip SWD-unresponsive, requires power cycle). The M55 0x64000000 bus-fault was partly a symptom of the init being disabled/broken, not solely a CM55-side AXI attribution issue.
 
 Resume next session by reading this file + the memory at `~/.claude/projects/-Users-danahern-code-claude-embedded/memory/project_pse84_psram.md`.
 
@@ -215,3 +215,75 @@ User will type `/clear` (or equivalent) and then either drop this file path in, 
 4. Pick the highest-value next step from §9 (probably: read datasheet → GDB register dump → compare against working MTB example).
 5. **Don't re-run ruled-out hypotheses from §4.** Don't re-verify M33 HyperBUS works — it does. Don't re-try wide-open MPC / MPU / different cache attributes without a new reason.
 6. **Don't park unless you hit a genuine milestone or the user says pause.** See `feedback_keep_going.md`.
+
+## 13. Session 2 log (datasheet read + M33-side regression discovery)
+
+**Datasheet read:** `/Users/danahern/Downloads/infineon-psoc-edge-e8x-industrial-datasheet-datasheet-en.pdf` (140 pg). Read top-to-bottom for PSRAM-relevant sections. **No new gotcha found.** Summary:
+- Errata §11: only autonomous-analog timer glitch + 3.3V GPIO leakage on B0 silicon. Not PSRAM.
+- Power domains §4.1.2: CM33 (LP) + CM55 (HP) share VCCD. SMIF is a single block in the power-mode table — no per-instance gate.
+- SMIF §5.5.4: "two SMIF interfaces, each equipped with 32 KB cache" — SMIF1 fully provisioned. "64 MB is supported in XIP mode." Matches arch ref manual.
+- Variant §9.1 / Table 50: `PSE846GPS2DBZC4A` is EPC2 security, BGA-220, 5120 KB SRAM. No footnote disabling SMIF1 on this SKU.
+- Pins §6: VDDIO.SMIF1 is a separate rail (E3/G3). If unpowered, SMIF1 wouldn't work at all — M33-side XIP historically proves it is powered.
+- Electrical §8.7: HyperBUS max 200 MHz. No voltage/clock trap.
+
+Conclusion: the datasheet does not reveal a new hypothesis. Hardware nominally supports exactly what we're doing.
+
+**Re-enabling M33 self-test (user ask: "do both, restore M33 self-test and GDB register dump"):** uncovered two real bugs in the current tree, NOT present in the §2 "what works" description.
+
+### Bug 1: `ifx_pse84_psram_init()` was commented out
+
+In `pse84_boot.c:347` (pre-fix), the call site was literally `/* ifx_pse84_psram_init(); */ /* DEBUG: disabled to isolate crash */`. So SMIF1 was never being configured at runtime. The handoff §2 "M33 side: reliably working" was true at some earlier commit but not in the current tree.
+
+### Bug 2: NULL deref on `smif1BlockConfig.memConfig[0]`
+
+After re-enabling the call, M33 bus-faulted immediately with BFAR=0x0, PC=0x3400802a (in M33SCODE, `pse84_boot.c` line 45, code_relocate'd). That line was:
+```c
+cy_stc_smif_mem_config_t const *memCfg = smif1BlockConfig.memConfig[0];
+```
+
+The `smif1BlockConfig` symbol is defined in TWO cycfg files, only one of which is compiled based on `CONFIG_INFINEON_SMIF_OCTAL`:
+- `modules/hal/infineon/zephyr-ifx-cycfg/kit_pse84_eval/cycfg_qspi_memslot_octal.c` — real slot (S70KS1283)
+- `modules/hal/infineon/zephyr-ifx-cycfg/kit_pse84_eval/cycfg_qspi_memslot.c:528` — **stub with `.memConfig = 0`**
+
+Our PSRAM-only build (OCTAL=n) links the stub, so `memConfig[0]` is a NULL deref. Fixed by replacing the dep with inline `CY_SMIF_SLAVE_SELECT_2` / `CY_SMIF_DATA_SEL0` constants (we build `psram_hb_memCfg` locally anyway).
+
+### Bug 3: SMIF1 stuck-busy inside init
+
+With both bugs fixed, M33 gets further into `ifx_pse84_psram_init` but hangs somewhere in the SMIF PDL calls (`Cy_SMIF_HyperBus_InitDevice`, `Cy_SMIF_InitCache`, or `Cy_SMIF_SetMode`). Symptoms:
+- No UART output after reset (fault handler never reached).
+- `openocd halt` on M33 reports `Failed to read memory at 0xe000edf0` — DAP unresponsive.
+- Physical power cycle required (USB + external power) to clear.
+
+### Bug 4: SOCMEM diagnostic channel faults from M33 Sec at this boot stage
+
+Attempted to use the M33↔M55 SOCMEM channel (handoff §11 item 4) for progress markers — writes to `0x36250020` from M33 Secure during `ifx_pse84_psram_init` bus-fault. `Cy_SysEnableSOCMEM(true)` + `cy_mpc_init()` run before `ifx_pse84_psram_init`, but M33-Sec write aperture to SOCMEM at that offset isn't configured yet. **Don't use 0x36250000–0x36250020 as a diagnostic channel from inside psram_init** until this is understood.
+
+### Reference example hint (not yet acted on)
+
+`/tmp/psram-xip-example/proj_cm33_s/main.c:362-394` (`smif_ospi_psram_init`) does NOT use `Cy_SMIF_HyperBus_InitDevice`. It uses:
+```c
+mtb_serial_memory_setup(&serial_memory_obj, MTB_SERIAL_MEMORY_CHIP_SELECT_2,
+                        CYBSP_SMIF_CORE_1_PSRAM_hal_config.base,
+                        CYBSP_SMIF_CORE_1_PSRAM_hal_config.clock,
+                        &smif_mem_context, &smif_mem_info, &smif1BlockConfig);
+```
+
+**This contradicts handoff §11 item 20** ("Configurator emits OPI DDR for HyperRAM. DON'T use mtb_serial_memory_setup with this cycfg."). Explanation: the example's `smif1BlockConfig` is a PSRAM-specific cycfg generated by building the example via MTB — different from the `kit_pse84_eval`-generated one we use. Worth building the reference example via MTB, dumping its generated `smif1BlockConfig`, and comparing flags (expect `CY_SMIF_FLAG_HYPERBUS_DEVICE` set and HyperBUS-mode commands, not OPI DDR).
+
+Also note the reference uses write-back caching (`CY_SMIF_CACHEABLE_WB_RWA`) not our write-through.
+
+### Next steps (ranked)
+
+1. **Build `mtb-example-psoc-edge-psram-xip` via MTB and inspect its generated cycfg.** Compare against our local `psram_hb_memCfg`. If they match, our hand-rolled setup should work — the hang is elsewhere (clocks? MPC? cache block?). If they differ, adopt the reference's flags.
+2. **Set GDB breakpoints inside `ifx_pse84_psram_init`** at each `Cy_SMIF_*` entry. Single-step to find which call hangs. Must be done before SMIF gets stuck-busy, or it's impossible to debug (DAP dies).
+3. **Add lightweight progress tracking that doesn't use SOCMEM** — e.g., write to a `.noinit` section in M33 Secure SRAM at 0x340xxxxx, mirror-map into M55's view via a specific MPC region. Avoids the 0x36250020 fault issue.
+4. **Re-check the reference example's `CYBSP_SMIF_CORE_1_PSRAM_hal_config.clock`** — if `mtb_serial_memory_setup` requires a valid clock handle and our local `ifx_pse84_psram_clock` (inst_num=4 for CLK_HF4) wasn't being passed through, that might explain the hang. Our current code doesn't pass a clock at all.
+
+### Updated claims vs. original handoff
+
+| Claim | Original | Actual |
+|---|---|---|
+| §2: M33-side XIP works reliably | "Reliably working" | **False in current tree.** Init was commented out; would NULL-deref if enabled. |
+| §11 item 4: SOCMEM channel usable from M33 Sec at `0x36250000` | "Flaky but works" | **Faults during `ifx_pse84_psram_init`** — MPC/apertures not set up yet. |
+| §11 item 20: `mtb_serial_memory_setup` can't be used with the cycfg | "DON'T use" | **Reference example uses it successfully with a different cycfg.** May be the right path after all, with the correct generated config. |
+| §4 table: M33 HyperBUS init proven | "Ruled out as source of issue" | **Unknown** — never actually ran successfully end-to-end in current tree. |
