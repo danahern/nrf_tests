@@ -1,6 +1,10 @@
 # PSE84 PSRAM (S70KS1283 HyperRAM on SMIF1/CS2) — Debug Hand-Off
 
-**Status as of 2026-04-12 (updated end-of-session):** M33-side SMIF1 init is NOT working in the current tree. Original handoff claim "M33 side reliably working" was stale. See §13 for the session log — two latent bugs in the init path were fixed (commit `bc3a58bfdb9` on zephyr submodule `pse84-gfxss-display-driver`), but init now hangs inside SMIF PDL calls, triggering SMIF1 stuck-busy (chip SWD-unresponsive, requires power cycle). The M55 0x64000000 bus-fault was partly a symptom of the init being disabled/broken, not solely a CM55-side AXI attribution issue.
+**STATUS: RESOLVED 2026-04-12 session 2.** CM55 XIP read/write to 0x64000000 (NS) is fully working. See §14 for resolution. Commit `62f7e55cae9` on zephyr submodule `pse84-gfxss-display-driver`, `cbda1c3` on outer main.
+
+**Root cause of the long-standing "CM55 bus-faults at 0x64000000":** the init wasn't running (was commented out) + had a latent NULL-deref + the hand-rolled `Cy_SMIF_HyperBus_InitDevice` sequence hung SMIF1 even when wired up. Replacing the hand-rolled path with `mtb_serial_memory_setup` fixed it in one shot.
+
+**Historical context (§1-12 below) preserved for future similar debugs — don't re-run the ruled-out hypotheses.**
 
 Resume next session by reading this file + the memory at `~/.claude/projects/-Users-danahern-code-claude-embedded/memory/project_pse84_psram.md`.
 
@@ -287,3 +291,58 @@ Also note the reference uses write-back caching (`CY_SMIF_CACHEABLE_WB_RWA`) not
 | §11 item 4: SOCMEM channel usable from M33 Sec at `0x36250000` | "Flaky but works" | **Faults during `ifx_pse84_psram_init`** — MPC/apertures not set up yet. |
 | §11 item 20: `mtb_serial_memory_setup` can't be used with the cycfg | "DON'T use" | **Reference example uses it successfully with a different cycfg.** May be the right path after all, with the correct generated config. |
 | §4 table: M33 HyperBUS init proven | "Ruled out as source of issue" | **Unknown** — never actually ran successfully end-to-end in current tree. |
+
+## 14. Resolution (2026-04-12 session 2 late)
+
+**Fix:** replaced the hand-rolled `Cy_SMIF_HyperBus_InitDevice` + `SetRxCaptureMode` + manual `SetDataSelect` sequence with a single `mtb_serial_memory_setup()` call, matching the Infineon reference `mtb-example-psoc-edge-psram-xip`.
+
+**Current `ifx_pse84_psram_init` flow** (abridged):
+
+```c
+Cy_SMIF_Disable(SMIF1_CORE);
+Cy_SMIF_Init(SMIF1_CORE, &smif1_config, 10000, &smif_ctx);
+Cy_SMIF_Enable(SMIF1_CORE, &smif_ctx);
+
+// The library does SetDataSelect, SetRxCaptureMode, HyperBus init:
+mtb_serial_memory_setup(&obj, MTB_SERIAL_MEMORY_CHIP_SELECT_2,
+                        SMIF1_CORE, &clock, &ctx, &info, &blockCfg);
+
+// PDL hardcodes PRESENT2=1 (fixed latency); S70KS1283 boots variable:
+SMIF_DEVICE_RD_DUMMY_CTL(dev) |= 2 << PRESENT2_Pos;
+SMIF_DEVICE_WR_DUMMY_CTL(dev) |= 2 << PRESENT2_Pos;
+
+Cy_SMIF_SetMode(SMIF1_CORE, CY_SMIF_MEMORY);
+Cy_SMIF_InitCache(SMIF1_CACHE_BLOCK, &cache_cfg);  // WT_RWA, 16 MB
+// Dynamic MPC (unchanged): wide-open PC 0-7 on both MPCs.
+```
+
+`blockCfg` is built locally as a single-slot `cy_stc_smif_block_config_t` pointing at a `cy_stc_smif_mem_config_t` with `.flags = HYPERBUS_DEVICE | MEMORY_MAPPED | WR_EN` and `.hbdeviceCfg` pointing to `CY_SMIF_HB_SRAM` / 16 MB / 6 dummy cycles. The clock handle is CLK_HF4 (SMIF1's HF clock) — passing NULL trips an assert inside the library.
+
+**Hardware verification:**
+```
+== smif1 range probe ==
+pre  @0x64000000 = 0x00000000
+pre  @0x64010000 = 0x00000000
+pre  @0x64800000 = 0x00000000
+writing canaries...
+post @0x64000000 = 0xcafebabe (want CAFEBABE)
+post @0x64010000 = 0xdeadbeef (want DEADBEEF)
+post @0x64800000 = 0x12345678 (want 12345678)
+```
+Three addresses spanning the full 16 MB aperture round-trip cleanly from CM55 NS at 0x64000000.
+
+**Why the hand-rolled path failed:** still not fully understood. `mtb_serial_memory_setup` + `Cy_SMIF_MemNumInit` internally handle the HyperBUS-capable `SetRxCaptureMode` in a different order/context than our manual sequence. Specifically, our manual sequence set RxCaptureMode to `XSPI_HYPERBUS_WITH_DQS` **before** `Cy_SMIF_Enable`, but the library flips it at a different point. One of those ordering differences is load-bearing.
+
+**Known outstanding issues (non-blocking for PSRAM functionality):**
+- openocd reports "clearing lockup after double fault" on reset — suggests M33 is still hitting some fault (possibly the 0x74000000 secure-alias self-test canary write), but M55 gets to run and use PSRAM, so it's not blocking.
+- Haven't measured throughput.
+- MPC is wide-open; should narrow to actual protection contexts used.
+
+## 15. Corrected claims (replaces §12 diff table)
+
+| Original handoff claim | Actual result |
+|---|---|
+| §2: M33-side XIP works, M55 still fails | **False.** Init was commented out + had NULL-deref. Once fixed AND rerouted through `mtb_serial_memory_setup`, both M33 and M55 work. |
+| §4: "CM55 cannot access SMIF1 XIP directly" was the hypothesis; all AXI-level gates ruled out | Correct — but moot. The issue was never AXI attribution. It was a broken SMIF1 controller init. |
+| §11 item 20: "DON'T use `mtb_serial_memory_setup`" | **Wrong.** Using it was the fix. The warning was based on a different cycfg producing garbage — the library path with a properly-flagged HYPERBUS_DEVICE memCfg works. |
+| §11 item 4: SOCMEM channel usable from M33 Sec | False during `ifx_pse84_psram_init` — faults. Don't use as a progress marker at that call site. |
