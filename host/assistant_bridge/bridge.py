@@ -35,7 +35,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="assistant-bridge")
     p.add_argument(
         "--transport",
-        choices=("bleak", "file-inject", "uart"),
+        choices=("bleak", "file-inject", "uart", "mac-mic"),
         default="file-inject",
         help=(
             "Uplink source. 'bleak' requires a connected PSE84 kit; "
@@ -90,6 +90,24 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--text-chunk-bytes", type=int, default=32)
     p.add_argument("--bleak-address", help="Target device address (bleak transport)")
+    # mac-mic transport options
+    p.add_argument(
+        "--mac-mic-device",
+        default=None,
+        help="sounddevice input device name/index (mac-mic transport; default: system default)",
+    )
+    p.add_argument(
+        "--mac-mic-max-seconds",
+        type=float,
+        default=8.0,
+        help="Max recording length per SPACE-toggle window (mac-mic transport)",
+    )
+    p.add_argument(
+        "--mac-mic-sample-rate",
+        type=int,
+        default=16000,
+        help="Capture sample rate for mac-mic transport (default 16000 to match device)",
+    )
     return p
 
 
@@ -346,12 +364,115 @@ async def _run_uart(
     return 0
 
 
+async def _run_mac_mic(
+    args: argparse.Namespace,
+    *,
+    capture_factory=None,
+    input_factory=None,
+) -> int:
+    """Mac mic transport: capture audio from macOS Core Audio (via sounddevice),
+    push-to-talk gated by SPACE in the terminal, feed PCM into the pipeline,
+    stream the LLM reply to stdout.
+
+    Independent of any PSE84 hardware. Useful as the demo path while
+    on-device PDM is being debugged.
+
+    ``capture_factory`` and ``input_factory`` let tests inject deterministic
+    PCM blobs and key sources without requiring sounddevice or a real TTY.
+    """
+    opus, transcriber, llm = _build_codecs(args)
+    cfg = PipelineConfig(
+        ollama_url=args.ollama_url,
+        ollama_model=args.ollama_model,
+        text_chunk_bytes=args.text_chunk_bytes,
+        dry_run_llm=args.dry_run_llm,
+        system_prompt=args.system_prompt,
+    )
+
+    async def stdout_outbound(raw: bytes):
+        return  # tokens stream via on_token below; outbound frames not needed
+
+    pipeline = AssistantPipeline(
+        config=cfg,
+        opus=opus,
+        transcriber=transcriber,
+        llm=llm,
+        on_outbound=stdout_outbound,
+    )
+
+    async def on_token(tok: str) -> None:
+        sys.stdout.write(tok)
+        sys.stdout.flush()
+
+    sample_rate = args.mac_mic_sample_rate
+
+    if capture_factory is None:
+        try:
+            from .mac_mic import SoundDeviceCapture
+        except ImportError as e:
+            print(
+                f"ERROR: --transport=mac-mic requires the 'sounddevice' "
+                f"package: pip install sounddevice ({e})",
+                file=sys.stderr,
+            )
+            return 2
+        capture = SoundDeviceCapture(
+            device=args.mac_mic_device,
+            sample_rate=sample_rate,
+            max_seconds=args.mac_mic_max_seconds,
+        )
+    else:
+        capture = capture_factory()
+
+    if input_factory is None:
+        from .mac_mic import StdinSpaceToggle
+
+        key_source = StdinSpaceToggle()
+    else:
+        key_source = input_factory()
+
+    print(
+        "mac-mic transport active. Press SPACE to start/stop recording. "
+        f"Max {args.mac_mic_max_seconds:.1f} s per turn. Ctrl-C to exit.\n"
+        f"Ollama: {args.ollama_url} model={args.ollama_model}",
+        file=sys.stderr,
+    )
+
+    try:
+        async for pcm_bytes in capture.iter_utterances(key_source):
+            duration_ms = (len(pcm_bytes) // 2) * 1000.0 / sample_rate
+            print(
+                f"\n[mac-mic] captured {len(pcm_bytes)//2} samples "
+                f"({duration_ms:.0f} ms)",
+                file=sys.stderr,
+            )
+            if len(pcm_bytes) < sample_rate * 2 // 10:  # < 100 ms
+                print("[mac-mic] too short, ignoring", file=sys.stderr)
+                continue
+            result = await pipeline.process_pcm(
+                pcm_bytes, sample_rate, on_token=on_token
+            )
+            print(
+                f"\n[mac-mic] transcript={result.transcript!r} "
+                f"reply_len={len(result.reply_text)}",
+                file=sys.stderr,
+            )
+    except KeyboardInterrupt:
+        print("\n[mac-mic] stopped", file=sys.stderr)
+    finally:
+        await capture.aclose()
+        key_source.close()
+    return 0
+
+
 async def _amain(argv: Optional[list[str]] = None) -> int:
     args = _build_parser().parse_args(argv)
     if args.transport == "file-inject":
         return await _run_file_inject(args)
     if args.transport == "uart":
         return await _run_uart(args)
+    if args.transport == "mac-mic":
+        return await _run_mac_mic(args)
     return await _run_bleak(args)
 
 

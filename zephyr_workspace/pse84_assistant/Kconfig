@@ -48,6 +48,23 @@ config APP_ANIMATION_PROCEDURAL
 	  Exactly one of SPRITES / PROCEDURAL should be enabled at a time;
 	  the default pair above matches that constraint.
 
+config APP_AUDIO_EMIT_OPUS
+	bool "Phase 3: emit Opus-encoded frames after PCM dump"
+	depends on OPUS && AUDIO_DMIC
+	default y
+	help
+	  When enabled, audio_capture_stop() additionally splits the captured
+	  16 kHz mono s16 buffer into 20 ms (320-sample) frames, encodes each
+	  through opus_wrap_encode_frame(), and emits a hex-framed
+	  OPUS_BEGIN / per-frame (u16-LE length + opus bytes) / OPUS_END block
+	  on the console UART immediately after the existing PCM dump. The
+	  PCM_BEGIN/END payload is left untouched so existing host parsers
+	  keep working — receive_pcm.py picks up the OPUS block opportunistically
+	  and writes a second WAV from the decoded frames.
+
+	  Disable to drop the encoder + decoder out of the firmware (saves
+	  ~50 KB heap on the M55) for PCM-only debug builds.
+
 config APP_SNAPSHOT
 	bool "Enable LVGL → PPM snapshot capture"
 	default n

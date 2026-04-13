@@ -137,6 +137,36 @@ Troubleshooting:
 * **Whisper downloads model on first run** — expected; ~150 MB for
   `base.en`, cached under `~/.cache/huggingface`.
 
+### mac-mic transport (macOS Core Audio, no device needed)
+
+Fallback / demo path when on-device PDM is unavailable. Uses the Mac's
+built-in microphone (or any `sounddevice` input device). SPACE toggles
+recording on/off; 8 s max per turn; ESC or Ctrl-C exits.
+
+```bash
+$PY -m assistant_bridge.bridge \
+    --transport=mac-mic \
+    --ollama-url=http://192.168.1.129:11434 \
+    --real
+```
+
+Options:
+
+- `--mac-mic-device=<name|index>` — pick a specific input device. List with:
+  ```bash
+  $PY -c 'import sounddevice; print(sounddevice.query_devices())'
+  ```
+- `--mac-mic-max-seconds` — hard cap per utterance (default 8 s).
+- `--mac-mic-sample-rate` — capture rate (default 16000 to match device).
+
+Troubleshooting:
+
+- First run prompts for microphone permission in macOS System Settings.
+- "No module named 'sounddevice'" → `pip install -r requirements.txt`.
+- No audio even after granting permission → verify input level in
+  `sounddevice.query_devices()` shows a non-zero "in" count on the device
+  you expect.
+
 ### bleak transport (requires hardware)
 
 Real L2CAP CoC client. Pass the peripheral's address:
