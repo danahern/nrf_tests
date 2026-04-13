@@ -1,13 +1,14 @@
 /*
- * PSE84 Voice Assistant — Phase 0a scaffold.
+ * PSE84 Voice Assistant — app main.
  *
- * Minimum viable skeleton for the voice-assistant app:
- *   - LVGL on the in-tree GFXSS display_driver_api (no shim).
- *   - One centered label ("PSE84 Assistant" on boot).
- *   - sw0 / user_bt (gpio_prt8 pin 3) toggles the label text between
- *     "IDLE" and "PRESSED" via a Zephyr input_callback.
+ * Wires the three pieces together and stays out of their way:
+ *   - state.c: IDLE / LISTENING / THINKING / RESPONDING state machine.
+ *   - ui.c: LVGL scene with a procedural animation per state.
+ *   - gpio_keys INPUT_KEY_0 (HW sw0, SDL SCANCODE_SPACE on native_sim)
+ *     drives state_cycle() on each press edge.
  *
- * No audio, BLE, IPC, or state machine yet — those are Phase 1+.
+ * No #ifdef CONFIG_BOARD_* here — the native_sim vs. HW differences are
+ * confined to the overlays + prj_*.conf files.
  */
 
 #include <zephyr/device.h>
@@ -19,25 +20,10 @@
 
 #include <lvgl.h>
 
+#include "state.h"
+#include "ui.h"
+
 LOG_MODULE_REGISTER(pse84_assistant, LOG_LEVEL_INF);
-
-/* UI state. Written only from the input callback (ISR context from gpio_keys'
- * deferred workqueue on most platforms, not a true ISR). Read from the main
- * loop under k_poll_signal_raise; atomic reads are sufficient for a single
- * bool here.
- */
-static atomic_t pressed;
-static lv_obj_t *status_label;
-
-static void update_label_text(void)
-{
-	const bool is_pressed = (bool)atomic_get(&pressed);
-
-	if (status_label == NULL) {
-		return;
-	}
-	lv_label_set_text(status_label, is_pressed ? "PRESSED" : "IDLE");
-}
 
 static void button_input_cb(struct input_event *evt, void *user_data)
 {
@@ -46,10 +32,11 @@ static void button_input_cb(struct input_event *evt, void *user_data)
 	if (evt->type != INPUT_EV_KEY || evt->code != INPUT_KEY_0) {
 		return;
 	}
-	/* evt->value: 1 = pressed, 0 = released. Toggle label on press only. */
+	/* evt->value: 1 = pressed, 0 = released. Cycle on press edge only. */
 	if (evt->value == 1) {
-		(void)atomic_set(&pressed, !atomic_get(&pressed));
-		LOG_INF("button press -> %s", atomic_get(&pressed) ? "PRESSED" : "IDLE");
+		const assist_state_t next = state_cycle();
+
+		LOG_INF("button press -> %s", state_name(next));
 	}
 }
 INPUT_CALLBACK_DEFINE(NULL, button_input_cb, NULL);
@@ -57,10 +44,9 @@ INPUT_CALLBACK_DEFINE(NULL, button_input_cb, NULL);
 int main(void)
 {
 	const struct device *display;
-	lv_obj_t *title_label;
 	int ret;
 
-	LOG_INF("=== PSE84 Assistant (Phase 0a) ===");
+	LOG_INF("=== PSE84 Assistant (Phase 1) ===");
 
 	display = DEVICE_DT_GET(DT_CHOSEN(zephyr_display));
 	if (!device_is_ready(display)) {
@@ -68,21 +54,11 @@ int main(void)
 		return -ENODEV;
 	}
 
-	/* Title on top, status in the middle. LVGL styles default to white-on-
-	 * black once the framebuffer is initialised — good enough for a PoC.
-	 */
-	title_label = lv_label_create(lv_screen_active());
-	lv_label_set_text(title_label, "PSE84 Assistant");
-	lv_obj_set_style_text_font(title_label, &lv_font_montserrat_28, 0);
-	lv_obj_align(title_label, LV_ALIGN_TOP_MID, 0, 40);
-
-	status_label = lv_label_create(lv_screen_active());
-	lv_label_set_text(status_label, "IDLE");
-	lv_obj_set_style_text_font(status_label, &lv_font_montserrat_28, 0);
-	lv_obj_align(status_label, LV_ALIGN_CENTER, 0, 0);
+	state_init();
+	ui_init();
 
 	/* First flush before unblanking to avoid a frame of garbage. */
-	lv_timer_handler();
+	ui_tick();
 	ret = display_blanking_off(display);
 	if (ret < 0 && ret != -ENOSYS) {
 		LOG_ERR("display_blanking_off failed: %d", ret);
@@ -90,8 +66,7 @@ int main(void)
 	}
 
 	while (1) {
-		update_label_text();
-		lv_timer_handler();
+		ui_tick();
 		k_sleep(K_MSEC(10));
 	}
 

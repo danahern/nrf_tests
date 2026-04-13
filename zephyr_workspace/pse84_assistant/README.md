@@ -3,8 +3,11 @@
 PSE84 Voice Assistant PoC (Zephyr). See the master plan at
 `.claude/plans/compiled-snuggling-nygaard.md` for the full roadmap.
 
-Phase 0a is the scaffold: LVGL + `sw0` (gpio_keys / INPUT_KEY_0) toggles a
-centered label between `IDLE` and `PRESSED`.
+Phase 1 (Track A) lands the four-state LVGL animation + state machine:
+`sw0` (gpio_keys / INPUT_KEY_0, SDL SPACE under native_sim) cycles
+`IDLE → LISTENING → THINKING → RESPONDING → IDLE`, each swapping a
+procedural animation. See [`docs/ANIMATIONS.md`](docs/ANIMATIONS.md)
+for the sprite-sheet-vs-procedural tradeoff.
 
 ## Hardware build (PSE84 kit)
 
@@ -48,7 +51,12 @@ west build -b native_sim/native/64 \
     -- -DCONF_FILE=prj_native_sim.conf
 
 ./build_native/zephyr/zephyr.exe
-# Press SPACE in the SDL window to toggle IDLE ↔ PRESSED
+# Press SPACE in the SDL window to cycle states:
+#   IDLE       -> gradient orb breathing (size + opacity over 2 s)
+#   LISTENING  -> 5-bar VU meter, heights animated out of phase
+#   THINKING   -> rotating lv_spinner (amber arc)
+#   RESPONDING -> typing-effect label with blinking cursor
+# The top-of-screen status label always shows the current state name.
 ```
 
 **Option B — macOS via OrbStack / Docker (build only; SDL window needs
