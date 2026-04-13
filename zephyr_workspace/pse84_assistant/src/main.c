@@ -7,24 +7,36 @@
  *   - gpio_keys INPUT_KEY_0 (HW sw0, SDL SCANCODE_SPACE on native_sim)
  *     drives state_cycle() on each press edge.
  *
- * No #ifdef CONFIG_BOARD_* here — the native_sim vs. HW differences are
- * confined to the overlays + prj_*.conf files.
+ * Two build flavours share this file:
+ *   - CONFIG_LVGL=y (HW, native_sim): full LVGL + display + gpio_keys
+ *     input path.
+ *   - CONFIG_LVGL=n (mps3/corstone300/an547 QEMU smoke test): headless
+ *     build; a k_timer periodically drives state_cycle() so the state
+ *     machine + Opus/framing code paths still execute on a real
+ *     Cortex-M55 runtime without any display or input hardware.
+ *
+ * Everything board-specific lives in the overlays + prj_*.conf files.
  */
 
+#include <zephyr/kernel.h>
+#include <zephyr/logging/log.h>
+
+#include "state.h"
+
+#ifdef CONFIG_LVGL
 #include <zephyr/device.h>
 #include <zephyr/drivers/display.h>
 #include <zephyr/input/input.h>
 #include <zephyr/dt-bindings/input/input-event-codes.h>
-#include <zephyr/kernel.h>
-#include <zephyr/logging/log.h>
 
 #include <lvgl.h>
 
-#include "state.h"
 #include "ui.h"
+#endif /* CONFIG_LVGL */
 
 LOG_MODULE_REGISTER(pse84_assistant, LOG_LEVEL_INF);
 
+#ifdef CONFIG_LVGL
 static void button_input_cb(struct input_event *evt, void *user_data)
 {
 	ARG_UNUSED(user_data);
@@ -40,13 +52,45 @@ static void button_input_cb(struct input_event *evt, void *user_data)
 	}
 }
 INPUT_CALLBACK_DEFINE(NULL, button_input_cb, NULL);
+#else  /* !CONFIG_LVGL — headless QEMU smoke test */
+
+/* 1 s is slow enough to be readable on the QEMU UART and fast enough
+ * that `west build -t run` sees all four states inside a short run.
+ */
+#define HEADLESS_CYCLE_PERIOD_MS 1000
+
+static void headless_cycle_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+	const assist_state_t next = state_cycle();
+
+	LOG_INF("headless tick -> %s", state_name(next));
+}
+
+static K_WORK_DEFINE(headless_cycle_work, headless_cycle_work_handler);
+
+static void headless_cycle_timer_cb(struct k_timer *t)
+{
+	ARG_UNUSED(t);
+	/* k_timer callbacks run in ISR context; state transitions touch
+	 * LOG_INF which wants a thread context. Defer to the system
+	 * workqueue.
+	 */
+	k_work_submit(&headless_cycle_work);
+}
+
+static K_TIMER_DEFINE(headless_cycle_timer, headless_cycle_timer_cb, NULL);
+#endif /* CONFIG_LVGL */
 
 int main(void)
 {
+	LOG_INF("=== PSE84 Assistant (Phase 1) ===");
+
+	state_init();
+
+#ifdef CONFIG_LVGL
 	const struct device *display;
 	int ret;
-
-	LOG_INF("=== PSE84 Assistant (Phase 1) ===");
 
 	display = DEVICE_DT_GET(DT_CHOSEN(zephyr_display));
 	if (!device_is_ready(display)) {
@@ -54,7 +98,6 @@ int main(void)
 		return -ENODEV;
 	}
 
-	state_init();
 	ui_init();
 
 	/* First flush before unblanking to avoid a frame of garbage. */
@@ -69,6 +112,15 @@ int main(void)
 		ui_tick();
 		k_sleep(K_MSEC(10));
 	}
+#else  /* !CONFIG_LVGL */
+	LOG_INF("headless mode: cycling state every %d ms", HEADLESS_CYCLE_PERIOD_MS);
+	k_timer_start(&headless_cycle_timer, K_MSEC(HEADLESS_CYCLE_PERIOD_MS),
+		      K_MSEC(HEADLESS_CYCLE_PERIOD_MS));
+
+	while (1) {
+		k_sleep(K_SECONDS(1));
+	}
+#endif /* CONFIG_LVGL */
 
 	return 0;
 }

@@ -5,8 +5,12 @@ common:
   platform_allow:
     - native_sim
     - native_sim/native/64
+    # Track D: smoke-test the framing code path on a real Cortex-M55 ISA
+    # (Armv8.1-M + MVE) under QEMU.
+    - mps3/corstone300/an547
   integration_platforms:
     - native_sim
     - native_sim/native/64
+    - mps3/corstone300/an547
 tests:
   pse84_assistant.framing: {}

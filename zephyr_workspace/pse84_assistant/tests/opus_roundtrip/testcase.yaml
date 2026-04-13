@@ -5,9 +5,13 @@ common:
   platform_allow:
     - native_sim
     - native_sim/native/64
+    # Track D: smoke-test libopus (FIXED_POINT=1, no-float) on a real
+    # Cortex-M55 with MVE under QEMU.
+    - mps3/corstone300/an547
   integration_platforms:
     - native_sim
     - native_sim/native/64
+    - mps3/corstone300/an547
   # libopus TUs emit a lot of benign warnings that do not deserve a test
   # failure.
   build_only: false

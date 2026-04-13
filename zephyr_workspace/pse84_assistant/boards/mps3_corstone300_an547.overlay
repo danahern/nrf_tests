@@ -1,0 +1,14 @@
+/*
+ * mps3/corstone300/an547 overlay for pse84_assistant — QEMU Cortex-M55
+ * smoke-test build.
+ *
+ * Intentionally empty: the upstream board DTS already provides uart0 as
+ * zephyr,console, NVIC, systick, and the MPS3 memory map (ITCM flash /
+ * DTCM SRAM). We deliberately do NOT declare a zephyr,display or
+ * gpio-keys node here — the QEMU model has no panel or buttons, and
+ * the headless build path in src/main.c (CONFIG_LVGL=n) drives state
+ * transitions from a k_timer instead.
+ *
+ * If the upstream board ever starts auto-enabling a display controller
+ * we do not want, suppress it here with `status = "disabled"`.
+ */

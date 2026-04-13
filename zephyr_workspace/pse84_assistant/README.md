@@ -79,6 +79,104 @@ banner via the emulated UART but SDL display init fails without a
 display server. For visual verification use Option A or add X
 forwarding (Linux VM / XQuartz + network X).
 
+## M55 QEMU smoke test (Track D)
+
+A third build target runs the app on a real Cortex-M55 ISA inside QEMU
+(Arm MPS3 Corstone-300 AN547 image — Armv8.1-M with MVE-I/MVE-F/FPU
+enabled) so the state machine, framing, and Opus code paths can be
+sanity-checked on an actual M55 without flashing hardware. Picked
+`mps3/corstone300/an547` because it's the canonical Zephyr default for
+this FPGA image; `mps3/corstone300/an552` is also Cortex-M55 and would
+work equivalently.
+
+Files that drive this:
+
+- `boards/mps3_corstone300_an547.overlay` — intentionally empty; the
+  upstream board DTS already provides uart0 (zephyr,console) + the MPS3
+  memory map. No panel / gpio-keys are declared since QEMU models
+  neither.
+- `prj_qemu_m55.conf` — disables LVGL / display / input / GFXSS / I2C /
+  octal flash (none of those exist on QEMU MPS3) and forces
+  `CONFIG_OPUS=y` to compile libopus through the real M55 toolchain.
+- `src/main.c` — `#ifdef CONFIG_LVGL` gates the LVGL + display + input
+  path. When LVGL is disabled, a `k_timer` cycles `state_cycle()` every
+  1 s and prints transitions to UART0, so the same state machine that
+  runs on HW executes here.
+- `src/CMakeLists.txt` — only compiles `src/ui.c` when `CONFIG_LVGL=y`.
+
+### Build + run
+
+```bash
+docker run --rm \
+    -v "$HOME/code/claude:$HOME/code/claude" \
+    -w "$PWD" -e HOME=/tmp \
+    -e ZEPHYR_SDK_INSTALL_DIR=/opt/toolchains/zephyr-sdk-1.0.1 \
+    ghcr.io/zephyrproject-rtos/ci:v0.29.1 \
+    bash -lc 'source zephyr_workspace/zephyrproject/zephyr/zephyr-env.sh && \
+        west build -b mps3/corstone300/an547 -d build_qemu_m55 \
+            -s zephyr_workspace/pse84_assistant -p always \
+            -- -DCONF_FILE=prj_qemu_m55.conf && \
+        west build -d build_qemu_m55 -t run'
+```
+
+Expected output (exit with `CTRL+a x`):
+
+```text
+*** Booting Zephyr OS build ...
+[00:00:00.000,000] <inf> pse84_assistant: === PSE84 Assistant (Phase 1) ===
+[00:00:00.000,000] <inf> pse84_assistant: headless mode: cycling state every 1000 ms
+[00:00:01.000,000] <inf> assist_state: state: IDLE -> LISTENING
+[00:00:01.000,000] <inf> pse84_assistant: headless tick -> LISTENING
+[00:00:02.000,000] <inf> assist_state: state: LISTENING -> THINKING
+... (cycles forever)
+```
+
+Memory usage: ~26 KB flash, ~154 KB RAM (libopus encode+decode contexts
+are the dominant heap consumer).
+
+### Ztest suites on M55
+
+Both `tests/framing` and `tests/opus_roundtrip` are wired into twister
+for `mps3/corstone300/an547` (see `platform_allow` +
+`integration_platforms` in each `testcase.yaml`). Run:
+
+```bash
+docker run --rm \
+    -v "$HOME/code/claude:$HOME/code/claude" \
+    -w "$PWD" -e HOME=/tmp \
+    -e ZEPHYR_SDK_INSTALL_DIR=/opt/toolchains/zephyr-sdk-1.0.1 \
+    ghcr.io/zephyrproject-rtos/ci:v0.29.1 \
+    bash -lc 'source zephyr_workspace/zephyrproject/zephyr/zephyr-env.sh && \
+        west twister -p mps3/corstone300/an547 \
+            -T zephyr_workspace/pse84_assistant/tests --inline-logs'
+```
+
+All 24 Ztest cases (16 framing + 8 opus_roundtrip) pass on the M55
+target.
+
+### M55-specific surprises
+
+- **Opus PLC needs bigger Ztest stack.** `test_plc_accepts_zero_length_input`
+  exercises the SILK decoder's PLC path, which allocates ~20+ KB of
+  stack frames on Armv8.1-M (AAPCS prologues + MVE register-save
+  areas are chunkier than native_sim's x86-64 compressed frames). The
+  default `CONFIG_ZTEST_STACK_SIZE=16384` overflows with a USAGE
+  FAULT. Bumped to 32 KB via
+  `tests/opus_roundtrip/boards/mps3_corstone300_an547.conf` — this is
+  per-board so native_sim keeps its compact sizing. Expect this to
+  matter when the HW app starts running the decoder on its own thread
+  (Phase 4): bump its thread stack to 32 KB up front.
+- **Opus image cost on M55 is real.** libopus adds ~60 TUs and ~450 KB
+  flash when linked in; the QEMU build shows just 26 KB because most
+  of libopus's fixed-point silk/celt code gets dead-stripped with the
+  app's minimal feature set. On HW with the full encoder+decoder path
+  live, budget the advertised ~450 KB against the 2304 KB app slot
+  (plenty of headroom).
+- **QEMU MPS3 has no panel / no buttons.** The headless main-loop
+  (`#ifdef CONFIG_LVGL`) branch is required — attempting to reuse the
+  HW main loop would trip on `DEVICE_DT_GET(DT_CHOSEN(zephyr_display))`
+  at compile time.
+
 ## Running tests (twister, native_sim)
 
 The `tests/` tree carries Ztest suites exercised from the Docker-based CI
