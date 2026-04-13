@@ -25,6 +25,11 @@ if(CONFIG_LVGL)
     target_sources(app PRIVATE src/ui.c)
 endif()
 
+# Snapshot helper (native_sim only; see src/snapshot.h).
+if(CONFIG_APP_SNAPSHOT)
+    target_sources(app PRIVATE src/snapshot.c)
+endif()
+
 target_include_directories(app PRIVATE src)
 
 # Track C: link the libopus INTERFACE target. No-op when CONFIG_OPUS=n.

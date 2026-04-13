@@ -12,6 +12,10 @@ build/
 **/build_ncs/
 build_native/
 build_native_docker/
+build_native_snapshot/
+build_native_x11/
+build_qemu_m55/
+build_hw_docker/
 
 # Clangd caches
 **/.cache/

@@ -1,0 +1,38 @@
+/*
+ * native_sim overlay for pse84_assistant snapshot capture.
+ *
+ * Differs from native_sim.overlay only in the chosen display: instead
+ * of SDL (which needs an X11 / Wayland / Metal host to open a window,
+ * and whose `dummy` video driver refuses to allocate a renderer), use
+ * the in-tree `zephyr,dummy-dc` display. lv_snapshot_take() renders
+ * the object tree into its own draw buffer, so the display driver's
+ * framebuffer is never actually read — dummy-dc is enough to satisfy
+ * the Zephyr LVGL integration's DEVICE_DT_GET(zephyr,display) probe.
+ *
+ * The input / gpio_keys path is dropped because the snapshot loop
+ * drives state_set() from a timer, never from the input subsystem.
+ */
+
+/ {
+	chosen {
+		zephyr,display = &dummy_dc;
+	};
+
+	dummy_dc: dummy_dc {
+		compatible = "zephyr,dummy-dc";
+		height = <240>;
+		width = <320>;
+	};
+};
+
+/* Disable the default native_sim SDL display + touch so the LVGL
+ * display probe binds to dummy_dc above, and the Zephyr build doesn't
+ * try to link SDL_CreateRenderer (which fails under SDL_VIDEODRIVER=dummy).
+ */
+&sdl_dc {
+	status = "disabled";
+};
+
+&input_sdl_touch {
+	status = "disabled";
+};

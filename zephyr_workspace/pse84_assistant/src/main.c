@@ -34,6 +34,12 @@
 #include "ui.h"
 #endif /* CONFIG_LVGL */
 
+#ifdef CONFIG_APP_SNAPSHOT
+#include <nsi_main.h>
+
+#include "snapshot.h"
+#endif
+
 LOG_MODULE_REGISTER(pse84_assistant, LOG_LEVEL_INF);
 
 #ifdef CONFIG_LVGL
@@ -107,6 +113,47 @@ int main(void)
 		LOG_ERR("display_blanking_off failed: %d", ret);
 		return ret;
 	}
+
+#ifdef CONFIG_APP_SNAPSHOT
+	/* Snapshot capture path: force each of the four states in turn,
+	 * pump LVGL for long enough that the per-state animations have
+	 * moved off their "frame 0" poses (LISTENING bars and IDLE orb
+	 * ease in/out over ~1 s), write a PPM per state, then exit.
+	 *
+	 * Timing: 1500 ms of ui_tick() at 10 ms/tick = 150 anim steps. That
+	 * places the IDLE orb and LISTENING bars well inside their first
+	 * cycle and gives the RESPONDING typing label ~18 characters in
+	 * (enough to clearly show the typing effect + cursor).
+	 */
+	static const struct {
+		assist_state_t state;
+		const char *path;
+	} shots[] = {
+		{ASSIST_IDLE,       "/tmp/snapshots/pse84_assistant_01_idle.ppm"},
+		{ASSIST_LISTENING,  "/tmp/snapshots/pse84_assistant_02_listening.ppm"},
+		{ASSIST_THINKING,   "/tmp/snapshots/pse84_assistant_03_thinking.ppm"},
+		{ASSIST_RESPONDING, "/tmp/snapshots/pse84_assistant_04_responding.ppm"},
+	};
+
+	for (size_t i = 0; i < ARRAY_SIZE(shots); i++) {
+		(void)state_set(shots[i].state);
+
+		for (int t = 0; t < 150; t++) {
+			ui_tick();
+			k_sleep(K_MSEC(10));
+		}
+
+		const int rc = app_snapshot_save_ppm(shots[i].path);
+
+		if (rc != 0) {
+			LOG_ERR("snapshot save failed for %s: %d",
+				state_name(shots[i].state), rc);
+			nsi_exit(1);
+		}
+	}
+	LOG_INF("snapshot capture complete, exiting");
+	nsi_exit(0);
+#endif /* CONFIG_APP_SNAPSHOT */
 
 	while (1) {
 		ui_tick();

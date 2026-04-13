@@ -79,6 +79,113 @@ banner via the emulated UART but SDL display init fails without a
 display server. For visual verification use Option A or add X
 forwarding (Linux VM / XQuartz + network X).
 
+## Headless PNG snapshots (Track E, Part 1)
+
+For code review or design critique where the person looking at the repo
+doesn't need an interactive window — just a rendered still per state —
+use the headless snapshot path. It runs entirely inside the Zephyr CI
+container (no X forwarding / XQuartz needed), captures one PNG per
+assist state, and commits the PNGs under `snapshots/`.
+
+Committed output:
+
+![IDLE](snapshots/pse84_assistant_01_idle.png)
+![LISTENING](snapshots/pse84_assistant_02_listening.png)
+![THINKING](snapshots/pse84_assistant_03_thinking.png)
+![RESPONDING](snapshots/pse84_assistant_04_responding.png)
+
+Regenerate locally:
+
+```bash
+./zephyr_workspace/pse84_assistant/tools/capture_snapshots.sh
+```
+
+How it works:
+
+- `prj_native_sim_snapshot.conf` + `boards/native_sim_snapshot.overlay`
+  swap the SDL display for Zephyr's in-tree `zephyr,dummy-dc` (the
+  `dummy` SDL video driver refuses to allocate a renderer, so we avoid
+  SDL entirely and render through LVGL's own software draw buffer).
+- `CONFIG_APP_SNAPSHOT=y` routes `main()` into a timer-driven state
+  sweep that forces each of the four assist states in turn, pumps
+  `lv_timer_handler()` for 1.5 s so animations have moved off their
+  frame-0 pose, then calls `lv_snapshot_take()` and streams the result
+  as a P6 PPM via `nsi_host_{open,write}` trampolines. After the
+  fourth state the app calls `nsi_exit(0)`.
+- `tools/capture_snapshots.sh` builds inside
+  `ghcr.io/zephyrproject-rtos/ci:v0.28.7` (SDK 1.0.0 from the host),
+  runs the binary with `SDL_VIDEODRIVER=dummy` as belt-and-suspenders,
+  bind-mounts `snapshots/` into the container as `/tmp/snapshots/`,
+  and post-processes the PPMs to PNG with Pillow (falls back to
+  `sips` on macOS). The PPM intermediates are removed after conversion.
+
+Limitations:
+
+- Resolution is 320×240 (native_sim's display size); HW is 800×480.
+  For pixel-accurate UI review bump `dummy_dc` in
+  `boards/native_sim_snapshot.overlay` and retune LVGL layout, but the
+  current snapshot size is a good preview for composition and colour.
+- Only a single still per state. The 1500 ms pump puts each animation
+  somewhere distinctive but non-deterministic — the IDLE orb size and
+  LISTENING bar heights will vary from run to run.
+
+## Viewing live LVGL on macOS (Track E, Part 2)
+
+`native_sim`'s SDL display can be forwarded from a Linux container to a
+macOS desktop via XQuartz, so you can iterate on LVGL visuals live —
+SPACE advances state, all four procedural animations run in real time.
+
+### One-time host setup
+
+1. `brew install --cask xquartz`
+2. Log out + back in (XQuartz registers its X11 socket at login).
+3. Launch XQuartz. Open *XQuartz → Settings → Security* (older builds
+   call the menu *Preferences*), tick **Allow connections from network
+   clients**, and restart XQuartz.
+4. In a macOS terminal, authorise the local user:
+   ```bash
+   xhost +si:localuser:$USER
+   ```
+   (Or, less restrictively: `xhost +localhost`.)
+
+### Run the app with X forwarding
+
+```bash
+docker run --rm -it \
+    -v "$HOME/code/claude:$HOME/code/claude" \
+    -v "$HOME/zephyr-sdk-1.0.0:/opt/toolchains/zephyr-sdk-1.0.0" \
+    -w "$HOME/code/claude/embedded-assistant" \
+    -e HOME=/tmp \
+    -e ZEPHYR_SDK_INSTALL_DIR=/opt/toolchains/zephyr-sdk-1.0.0 \
+    -e DISPLAY=host.docker.internal:0 \
+    ghcr.io/zephyrproject-rtos/ci:v0.28.7 \
+    bash -lc 'source zephyr_workspace/zephyrproject/zephyr/zephyr-env.sh && \
+        west build -b native_sim/native/64 \
+            -d zephyr_workspace/pse84_assistant/build_native_x11 \
+            -s zephyr_workspace/pse84_assistant -p always \
+            -- -DCONF_FILE=prj_native_sim.conf && \
+        ./zephyr_workspace/pse84_assistant/build_native_x11/zephyr/zephyr.exe'
+```
+
+Expected: a 320×240 SDL window appears with the IDLE orb breathing.
+SPACE cycles `IDLE → LISTENING → THINKING → RESPONDING → IDLE`; the
+top-of-screen label mirrors the active state.
+
+### Troubleshooting
+
+- `Could not initialize SDL: No available video device` — X forwarding
+  isn't reaching the container. Re-run `xhost +si:localuser:$USER` on
+  the host, and check `echo $DISPLAY` **inside** the container prints
+  `host.docker.internal:0`.
+- `cannot open display: host.docker.internal:0` — "Allow connections
+  from network clients" isn't checked in XQuartz settings, or XQuartz
+  wasn't restarted after toggling it.
+- `No XRandR extension` — happens on some XQuartz rebuilds. Reinstall
+  XQuartz (`brew reinstall --cask xquartz`) and log out / back in.
+- Window opens but stays black — the app aborted before LVGL flushed a
+  frame; check the container stdout for the `pse84_assistant` banner
+  and any LVGL errors.
+
 ## M55 QEMU smoke test (Track D)
 
 A third build target runs the app on a real Cortex-M55 ISA inside QEMU

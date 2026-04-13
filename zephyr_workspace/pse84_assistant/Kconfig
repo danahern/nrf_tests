@@ -1,0 +1,24 @@
+# pse84_assistant app-level Kconfig.
+#
+# Only exposes knobs that are purely app-layer. Board / subsystem config
+# goes in prj.conf / prj_*.conf.
+
+menu "pse84_assistant app"
+
+config APP_SNAPSHOT
+	bool "Enable LVGL → PPM snapshot capture"
+	default n
+	depends on LVGL && BOARD_NATIVE_SIM
+	select LV_USE_SNAPSHOT
+	help
+	  When enabled, main() runs a snapshot-capture sequence instead of
+	  the normal interactive loop: it cycles through all four assist
+	  states, lets each animation settle for a few frames, writes a
+	  binary PPM file of lv_screen_active() per state to /tmp/snapshots,
+	  then calls nsi_exit(0). Intended to be driven from
+	  tools/capture_snapshots.sh which post-processes the PPMs into
+	  PNGs committed to the repo.
+
+endmenu
+
+source "Kconfig.zephyr"
