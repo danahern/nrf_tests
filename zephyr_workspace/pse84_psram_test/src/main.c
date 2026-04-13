@@ -4,21 +4,20 @@
 int main(void)
 {
 	k_msleep(2000);
-	printk("== psram test ==\n");
+	printk("== smif1 range probe ==\n");
 	k_msleep(200);
 
-	volatile uint32_t *p = (volatile uint32_t *)0x64000000U;
+	printk("0x64000000 (start)...\n"); k_msleep(200);
+	uint32_t a = *(volatile uint32_t *)0x64000000U;
+	printk("  = 0x%08x\n", a); k_msleep(200);
 
-	printk("read [0]...\n");
-	k_msleep(200);
-	uint32_t r0 = p[0];
-	printk("[0] = 0x%08x\n", r0);
-	k_msleep(200);
+	printk("0x64010000 (+64K)...\n"); k_msleep(200);
+	uint32_t b = *(volatile uint32_t *)0x64010000U;
+	printk("  = 0x%08x\n", b); k_msleep(200);
 
-	printk("write 0xDEADBEEF @[0]...\n");
-	k_msleep(200);
-	p[0] = 0xDEADBEEFU;
-	printk("readback: 0x%08x\n", p[0]);
+	printk("0x66000000 (+32M, outside cached region)...\n"); k_msleep(200);
+	uint32_t c = *(volatile uint32_t *)0x66000000U;
+	printk("  = 0x%08x\n", c);
 
 	while (1) { k_msleep(1000); }
 	return 0;
