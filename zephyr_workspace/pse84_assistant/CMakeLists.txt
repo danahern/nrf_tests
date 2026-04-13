@@ -26,6 +26,29 @@ if(CONFIG_LVGL)
     target_sources(app PRIVATE src/ui.c)
 endif()
 
+# Phase 1b: sprite-sheet playback. Only pulled into the build when both
+# LVGL and the SPRITES Kconfig are on. Assets are committed in-tree under
+# assets/<state>/frames.c (+ frames.bin.inc #included from it); the
+# per-state frames.c pulls its own byte blob via generate_inc_file_for_target
+# so the concatenated LZ4 payload lands in .rodata on the target.
+if(CONFIG_LVGL AND CONFIG_APP_ANIMATION_SPRITES)
+    target_sources(app PRIVATE
+        src/sprites.c
+        third_party/lz4/lz4_decompress.c
+        assets/idle/frames.c
+        assets/listening/frames.c
+        assets/thinking/frames.c
+        assets/responding/frames.c
+    )
+    target_include_directories(app PRIVATE
+        third_party/lz4
+        assets/idle
+        assets/listening
+        assets/thinking
+        assets/responding
+    )
+endif()
+
 # Snapshot helper (native_sim only; see src/snapshot.h).
 if(CONFIG_APP_SNAPSHOT)
     target_sources(app PRIVATE src/snapshot.c)

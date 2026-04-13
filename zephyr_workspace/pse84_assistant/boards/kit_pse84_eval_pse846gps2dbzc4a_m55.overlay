@@ -1,15 +1,17 @@
 #include <zephyr/dt-bindings/display/panel.h>
 
 /*
- * Extend the M55 XIP partition from its default 2 MB to 10 MB so there's
- * room for 8.64 MB of embedded animation frame data alongside the app
- * code. The remaining ~5 MB of free QSPI flash beyond 0x60F00000 stays
- * unallocated for future use. Safe because the M55 is loaded by
- * Cy_SysEnableCM55() directly from this region and is not mcuboot-signed,
- * so no slot-size math changes are needed in the signing pipeline.
+ * Extend the M55 XIP partition to 24 MB to hold the Phase 1b branded
+ * sprite assets (~11 MiB at tier A 800x480, LZ4-compressed — see
+ * assets/TIER_LOG.md) alongside the app text + LVGL + libopus. The
+ * 58 MB octal-NOR XIP aperture at 0x60100000 has plenty of headroom;
+ * 24 MB leaves ~34 MB for future phases. Safe because the M55 is loaded
+ * by Cy_SysEnableCM55() directly from this region and is not
+ * mcuboot-signed, so no slot-size math changes are needed in the
+ * signing pipeline.
  */
 &m55_xip {
-	reg = <0x60500000 DT_SIZE_M(10)>;
+	reg = <0x60500000 DT_SIZE_M(24)>;
 };
 
 /* I2C on SCB0 — used by the Waveshare 4.3" panel MCU at 0x45 */
@@ -66,6 +68,23 @@ i2c0: &scb0 {
 / {
 	chosen {
 		zephyr,display = &gfxss;
+	};
+
+	/*
+	 * Phase 1b: 1 MiB scratch region in SOCMEM for the sprite playback
+	 * framebuffer (800*480*2 = 768000 bytes for tier A). Placed at the
+	 * 1 MiB aligned slot immediately following socmem_fb (0x26240000 +
+	 * 0x100000 = 0x26340000). The M55 linker does not own SOCMEM, so
+	 * we point a Zephyr memory-region at it and use DT_REG_ADDR() from
+	 * src/sprites.c to place the static scratch buffer via
+	 * Z_GENERIC_SECTION.
+	 */
+	reserved-memory {
+		socmem_sprite: memory@26340000 {
+			compatible = "zephyr,memory-region", "mmio-sram";
+			reg = <0x26340000 DT_SIZE_K(1024)>;
+			zephyr,memory-region = "SOCMEM_SPRITE";
+		};
 	};
 };
 
@@ -161,6 +180,19 @@ dmic_dev: &dmic0 {
 &dmic0_ch2 {
 	status = "okay";
 	use-alt-io;
+};
+
+/*
+ * ch3 must be enabled too even though we only consume ch2 in mono.
+ * The Infineon PDM engine configures ch2/ch3 as a stereo pair sharing
+ * CLK+DATA; leaving ch3 disabled produces "silence with a click" —
+ * a one-shot transient at capture start, then no sampling. Matches
+ * upstream zephyr/samples/drivers/audio/dmic/boards/kit_pse84_eval*
+ * which also enables both. req_num_chan=1 + PDM_CHAN_LEFT in audio.c
+ * still routes only ch2 data to the ring buffer.
+ */
+&dmic0_ch3 {
+	status = "okay";
 };
 
 /*

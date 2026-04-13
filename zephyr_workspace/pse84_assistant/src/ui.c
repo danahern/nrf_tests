@@ -22,6 +22,10 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 
+#ifdef CONFIG_APP_ANIMATION_SPRITES
+#include "sprites.h"
+#endif
+
 LOG_MODULE_REGISTER(assist_ui, LOG_LEVEL_INF);
 
 #define RESPOND_BARS          5
@@ -53,6 +57,7 @@ struct ui_scene {
 
 static struct ui_scene ui;
 
+#ifdef CONFIG_APP_ANIMATION_PROCEDURAL
 /* ---- animation callbacks (LVGL calls these with int32_t values) ---- */
 
 static void anim_orb_size_cb(void *var, int32_t v)
@@ -226,11 +231,32 @@ static void build_responding_group(lv_obj_t *parent)
 	/* Timer runs permanently; pauses visually whenever the group is hidden. */
 	ui.typing_timer = lv_timer_create(typing_timer_cb, TYPING_TICK_MS, NULL);
 }
+#endif /* CONFIG_APP_ANIMATION_PROCEDURAL */
 
 /* ---- state switching ---- */
 
 static void ui_show_state(assist_state_t s)
 {
+#ifdef CONFIG_APP_ANIMATION_SPRITES
+	/* Sprite path: all four groups stay hidden (built conditionally, see
+	 * build_*_group calls in ui_init); one sprite_sheet plays on the
+	 * dedicated lv_image widget.
+	 */
+	const struct sprite_sheet *sheet = NULL;
+
+	switch (s) {
+	case ASSIST_IDLE:       sheet = &sprite_sheet_idle;       break;
+	case ASSIST_LISTENING:  sheet = &sprite_sheet_listening;  break;
+	case ASSIST_THINKING:   sheet = &sprite_sheet_thinking;   break;
+	case ASSIST_RESPONDING: sheet = &sprite_sheet_responding; break;
+	default: break;
+	}
+	sprites_play(sheet);
+
+	if (ui.status_label != NULL) {
+		lv_label_set_text(ui.status_label, state_name(s));
+	}
+#else
 	static const struct {
 		assist_state_t state;
 		lv_obj_t **group;
@@ -261,6 +287,7 @@ static void ui_show_state(assist_state_t s)
 	if (s == ASSIST_RESPONDING) {
 		ui.typing_idx = 0;
 	}
+#endif
 }
 
 static void on_state_entry(assist_state_t prev, assist_state_t next)
@@ -283,10 +310,17 @@ void ui_init(void)
 	lv_obj_set_style_text_color(ui.status_label, lv_color_hex(0xFFFFFF), 0);
 	lv_obj_align(ui.status_label, LV_ALIGN_TOP_MID, 0, 8);
 
+#ifdef CONFIG_APP_ANIMATION_SPRITES
+	if (sprites_init(scr) != 0) {
+		LOG_ERR("sprites_init failed; screen will remain blank");
+	}
+#endif
+#ifdef CONFIG_APP_ANIMATION_PROCEDURAL
 	build_idle_group(scr);
 	build_listening_group(scr);
 	build_thinking_group(scr);
 	build_responding_group(scr);
+#endif
 
 	/* Show the current state; hide others. */
 	ui_show_state(state_get());

@@ -431,3 +431,134 @@ fail a single capture. Follow-ups to evaluate:
 - Switch to an RTT backend for the PCM payload (log over SWD instead
   of UART). `CONFIG_USE_SEGGER_RTT=y` is a one-line change and
   bypasses the CDC bridge entirely.
+
+## Phase 1b: branded sprite animations
+
+Phase 1b replaces the procedural LVGL widget animations (orb / VU bars /
+spinner / typing label) with video-sourced branded sprite sheets — one
+per assist state — on the PSE84 kit. The procedural path stays as a
+Kconfig-gated fallback so `native_sim` (RGBA8888 320×240, no 800×480
+frame budget) and the Cortex-M55 QEMU smoke build (displayless) keep
+building.
+
+### Source → state mapping (intentional rename)
+
+The mp4 filenames don't match the assist states 1:1:
+
+```text
+~/Downloads/idle.mp4        → assets/idle/        (ASSIST_IDLE)
+~/Downloads/thinking.mp4    → assets/listening/   (ASSIST_LISTENING)
+~/Downloads/working.mp4     → assets/thinking/    (ASSIST_THINKING)
+~/Downloads/responding.mp4  → assets/responding/  (ASSIST_RESPONDING)
+```
+
+Rationale: the "thinking" pose plays while the mic is listening, and
+"working" plays while the LLM computes. See memory note
+`project_pse84_animation_mapping.md` for the user-experience reasoning.
+
+### Asset pipeline (macOS host)
+
+`tools/video_to_sprites.py` drives the whole regenerate cycle:
+
+```bash
+~/.pyenv/versions/3.11.11/envs/zephyr-env/bin/python3 \
+    zephyr_workspace/pse84_assistant/tools/video_to_sprites.py
+```
+
+Stages, per source mp4:
+
+1. `ffmpeg` scale-letterbox to target W×H @ 24 fps, capped at 3 s (72
+   frames), emits raw `rgb565le`.
+2. Per-frame `lz4.block.compress(mode='high_compression', compression=9,
+   store_size=False)`.
+3. Emit `assets/<state>/{frames.bin.inc, frames.h, frames.c}`. The
+   `.bin.inc` is a comma-separated byte list `#include`d from
+   `frames.c`; the frame table is a `struct sprite_frame_rec[]` of
+   `{ lz4_off, lz4_len, raw_len }`.
+
+Tier policy (automatic, logged to `assets/TIER_LOG.md`):
+
+- **Tier A — 800×480 RGB565 + LZ4, 24 fps, 3 s loops.** Target ≤ 40 MiB
+  total. Actual: **~11.0 MiB total (2.4–3.4 MiB / state, ~20× LZ4
+  ratio).** Tier A lands with ~30 MiB headroom.
+- **Tier B — 400×240 + `lv_img_set_zoom(512)` 2× at render.** Reserved
+  for regressions on stylized source content. The pipeline
+  auto-regenerates at tier B and flips
+  `CONFIG_APP_ANIMATION_SPRITES_TIER_B=y` is a manual Kconfig toggle
+  (pipeline only emits the assets).
+
+Decision this session: **tier A landed** at 11 MiB.
+
+### Kconfig knobs
+
+```text
+APP_ANIMATION_SPRITES      = y on kit_pse84_eval, n elsewhere
+APP_ANIMATION_PROCEDURAL   = !SPRITES
+APP_ANIMATION_SPRITES_TIER_B = n  # flip with --force-tier B regeneration
+```
+
+`CMakeLists.txt` conditionally pulls `src/sprites.c`,
+`third_party/lz4/lz4_decompress.c`, and the four `assets/*/frames.c`
+sources only when `LVGL && APP_ANIMATION_SPRITES`.
+
+### On-device playback
+
+`src/sprites.c`:
+
+- Reserves a 768 KiB scratch framebuffer in a new 1 MiB SOCMEM region
+  `socmem_sprite` at `0x26340000` (declared in
+  `boards/kit_pse84_eval_pse846gps2dbzc4a_m55.overlay`). Lives
+  immediately after `socmem_fb`. RAM on-chip is only 256 KiB, so the
+  scratch can't fit in .bss.
+- On `sprites_play(sheet)`: stops any prior timer, decompresses frame 0
+  into scratch, points an `lv_image_dsc_t` at it
+  (`LV_COLOR_FORMAT_RGB565`, native-endian little-endian), and starts a
+  periodic `lv_timer` at `1000/fps` ms. Each tick advances `frame_idx`,
+  decompresses into the *same* scratch buffer, calls
+  `lv_image_cache_drop(&dsc) + lv_image_set_src(img, &dsc) +
+  lv_obj_invalidate(img)` so LVGL re-reads the updated pixels.
+- `LOG_INF` every 48 frames (~2 s at 24 fps) with
+  `last_us / avg_us` decompression time per frame for field-measurable
+  budget verification.
+
+### LZ4 decoder (vendored)
+
+`third_party/lz4/lz4_decompress.{c,h}` is a ~120 LOC single-shot
+block-format decoder. Rationale for vendoring instead of upstream
+`lz4.c`:
+
+- Zephyr's in-tree `modules/` does not ship lz4 (verified 2026-04-12).
+- Upstream `lz4.c` is ~2700 LOC with streaming + HC encoder we don't
+  need; the compressor runs on the host only.
+- Byte-for-byte validated against the Python `lz4.block` pipeline on
+  empty/short/zeros/random/highly-compressible payloads and a full
+  800×480 sprite frame.
+
+### Build matrix
+
+| Target | Config | Sprites | Result |
+|---|---|---|---|
+| `kit_pse84_eval/pse846gps2dbzc4a/m55` | `prj.conf` (sysbuild) | y | FLASH 47.76 % of 24 MiB, RAM 97 % of 132 KiB (scratch is in SOCMEM so RAM stays small) |
+| `native_sim/native/64` | `prj_native_sim.conf` | n (procedural) | green |
+| `mps3/corstone300/an547` | `prj_qemu_m55.conf` | n (LVGL=n) | green |
+
+### Regeneration recipe
+
+```bash
+# 1. Regenerate the assets (tier A auto-chosen if ≤ 40 MiB).
+~/.pyenv/versions/3.11.11/envs/zephyr-env/bin/python3 \
+    zephyr_workspace/pse84_assistant/tools/video_to_sprites.py
+
+# 2. Force tier B instead (400x240 + 2x render zoom).
+~/.pyenv/versions/3.11.11/envs/zephyr-env/bin/python3 \
+    zephyr_workspace/pse84_assistant/tools/video_to_sprites.py \
+    --force-tier B
+# Then flip CONFIG_APP_ANIMATION_SPRITES_TIER_B=y in prj.conf.
+
+# 3. HW rebuild + flash (4-pass, see memory project_pse84_octal_enabled.md).
+cd zephyr_workspace/zephyrproject && source zephyr/zephyr-env.sh
+export ZEPHYR_SDK_INSTALL_DIR=$HOME/zephyr-sdk-1.0.0
+export PATH=$HOME/zephyr-sdk-1.0.0/gnu/arm-zephyr-eabi/bin:$PATH
+west build -b kit_pse84_eval/pse846gps2dbzc4a/m55 --sysbuild \
+    -d build_hw -s zephyr_workspace/pse84_assistant -p always
+```
