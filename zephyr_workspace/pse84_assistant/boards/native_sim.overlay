@@ -1,0 +1,45 @@
+/*
+ * native_sim overlay for pse84_assistant — off-hardware dev build.
+ *
+ * Wires the host SDL display + a single SDL-emulated GPIO key so the same
+ * INPUT_KEY_0 path used on real HW (gpio_keys → input subsystem) lights up
+ * here. Press SPACE in the SDL window to toggle the label.
+ *
+ * Intentionally minimal: display comes from the in-tree native_sim SDL
+ * display driver; no DSI / GFXSS / I2C panel bridge is modelled here.
+ */
+
+#include <zephyr/dt-bindings/input/input-event-codes.h>
+
+/ {
+	chosen {
+		zephyr,display = &sdl_dc;
+	};
+
+	keys: keys {
+		compatible = "gpio-keys";
+
+		button0: button0 {
+			/* SDL-emul pin 1 on gpio0. Pin 0 is LED on the canonical
+			 * native_sim overlay; keep pin 1 to avoid scancode=0.
+			 */
+			gpios = <&gpio0 1 GPIO_ACTIVE_HIGH>;
+			zephyr,code = <INPUT_KEY_0>;
+		};
+	};
+
+	aliases {
+		sw0 = &button0;
+	};
+};
+
+&gpio0 {
+	ngpios = <2>;
+
+	sdl_gpio {
+		status = "okay";
+		compatible = "zephyr,gpio-emul-sdl";
+		/* pin 0 unused (scancode 0), pin 1 = SDL SCANCODE_SPACE (44) */
+		scancodes = <0 44>;
+	};
+};

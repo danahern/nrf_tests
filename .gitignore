@@ -10,6 +10,8 @@ zephyr_workspace/ble_test_env/
 # Build artifacts
 build/
 **/build_ncs/
+build_native/
+build_native_docker/
 
 # Clangd caches
 **/.cache/
