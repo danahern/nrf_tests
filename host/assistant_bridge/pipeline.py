@@ -25,6 +25,12 @@ from .framing import Frame, FrameType, encode_frame
 # ---------- config & results -------------------------------------------------
 
 
+DEFAULT_SYSTEM_PROMPT = (
+    "You are a concise voice assistant running on a PSE84 device. "
+    "Reply in 1-3 sentences unless the user asks for more."
+)
+
+
 @dataclass
 class PipelineConfig:
     sample_rate: int = 16000
@@ -33,6 +39,7 @@ class PipelineConfig:
     ollama_model: str = "glm-4.7"
     text_chunk_bytes: int = 32  # SDU-friendly 20-40 B per master plan
     dry_run_llm: bool = False
+    system_prompt: str = DEFAULT_SYSTEM_PROMPT
 
     @property
     def frame_samples(self) -> int:
@@ -94,15 +101,26 @@ class DryRunLLM:
 class OllamaLLM:
     """Real /api/chat streaming client. Kept tiny; mocked in tests."""
 
-    def __init__(self, base_url: str, model: str, timeout: float = 60.0):
+    def __init__(
+        self,
+        base_url: str,
+        model: str,
+        timeout: float = 60.0,
+        system_prompt: str | None = None,
+    ):
         self._url = base_url.rstrip("/") + "/api/chat"
         self._model = model
         self._timeout = timeout
+        self._system_prompt = system_prompt
 
     async def stream_reply(self, prompt: str) -> AsyncIterator[str]:
+        messages: list[dict[str, str]] = []
+        if self._system_prompt:
+            messages.append({"role": "system", "content": self._system_prompt})
+        messages.append({"role": "user", "content": prompt})
         body = {
             "model": self._model,
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": messages,
             "stream": True,
         }
         async with httpx.AsyncClient(timeout=self._timeout) as client:
@@ -280,13 +298,22 @@ class AssistantPipeline:
             text_chunks_sent=chunks_sent,
         )
 
-    async def _stream_reply(self, prompt: str) -> "tuple[str, int]":
+    async def _stream_reply(
+        self,
+        prompt: str,
+        *,
+        on_token: Callable[[str], Awaitable[None] | None] | None = None,
+    ) -> "tuple[str, int]":
         reply_parts: list[str] = []
         pending = ""
         chunks_sent = 0
         async for token in self._llm.stream_reply(prompt):
             reply_parts.append(token)
             pending += token
+            if on_token is not None:
+                res = on_token(token)
+                if asyncio.iscoroutine(res):
+                    await res
             # Flush whenever we have at least max_chunk bytes ready.
             while len(pending.encode("utf-8")) >= self._cfg.text_chunk_bytes:
                 flush_chunks = tokens_to_text_chunks(pending, self._cfg.text_chunk_bytes)
@@ -304,6 +331,40 @@ class AssistantPipeline:
             chunks_sent += 1
         await self._emit(FrameType.TEXT_END, b"")
         return "".join(reply_parts), chunks_sent
+
+    # ---------------- raw-PCM path (UART transport) ----------------------
+
+    async def process_pcm(
+        self,
+        pcm: bytes,
+        sample_rate: int,
+        *,
+        on_token: Callable[[str], Awaitable[None] | None] | None = None,
+    ) -> PipelineResult:
+        """Transcribe a complete utterance of raw 16-bit LE mono PCM and
+        stream the LLM reply.
+
+        Unlike :meth:`process_wav`, this path skips Opus entirely — the
+        PSE84 UART protocol delivers raw PCM, so we transcribe directly.
+
+        If ``on_token`` is supplied it is invoked for each LLM token as it
+        arrives (stdout streaming for the UART transport).
+        """
+        if sample_rate != self._cfg.sample_rate:
+            raise ValueError(
+                f"PCM sample rate {sample_rate} != expected "
+                f"{self._cfg.sample_rate}"
+            )
+        transcript = self._transcriber.transcribe(pcm, sample_rate)
+        reply_text, chunks_sent = await self._stream_reply(
+            transcript, on_token=on_token
+        )
+        return PipelineResult(
+            audio_frames_encoded=0,
+            transcript=transcript,
+            reply_text=reply_text,
+            text_chunks_sent=chunks_sent,
+        )
 
     # ---------------- file-inject simulator ------------------------------
 

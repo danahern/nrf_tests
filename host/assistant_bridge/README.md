@@ -67,6 +67,76 @@ curl -s "$OLLAMA_URL/api/chat" \
     | head
 ```
 
+### uart transport (PSE84 over USB-UART — Phase 2 bridge)
+
+End-to-end: **hold sw0, speak, LLM replies on Mac.**
+
+This wires Phase 2's `PCM_BEGIN / <hex> / PCM_END` UART protocol into
+the same pipeline. Raw PCM is fed directly to faster-whisper (no Opus on
+this path), the transcript is sent to Ollama, and reply tokens stream to
+stdout as they arrive.
+
+Prereqs:
+
+1. PSE84 `pse84_assistant` firmware flashed, USB-UART enumerated as
+   `/dev/cu.usbmodem*` on macOS.
+2. Reachable Ollama server, e.g. `http://192.168.1.129:11434` with the
+   `glm-4.7` model pulled.
+3. `pyserial` + `faster-whisper` installed (see `requirements.txt`).
+
+Smoke test the Ollama endpoint first:
+
+```bash
+curl -s http://192.168.1.129:11434/api/tags | jq '.models[].name'
+```
+
+Run the bridge (the firmware autosends captures while `sw0` is held):
+
+```bash
+PY=~/.pyenv/versions/3.11.11/envs/zephyr-env/bin/python3
+export OLLAMA_URL=http://192.168.1.129:11434
+
+$PY -m assistant_bridge.bridge \
+    --transport=uart \
+    --ollama-url=$OLLAMA_URL \
+    --ollama-model=glm-4.7 \
+    --real
+```
+
+Flags:
+
+| flag | default | notes |
+|------|---------|-------|
+| `--uart-port` | auto (glob) | Explicit serial device; overrides glob. |
+| `--uart-port-glob` | `/dev/cu.usbmodem*` | Glob when `--uart-port` is unset. |
+| `--uart-baud` | `460800` | Must match the device firmware. |
+| `--ollama-url` | `http://192.168.1.129:11434` | Or `$OLLAMA_URL`. |
+| `--ollama-model` | `glm-4.7` | Any Ollama-pulled model. |
+| `--system-prompt` | short voice-assistant preamble | Sent as the `system` role on every turn. |
+| `--dry-run-llm` | off | Skip Ollama, return a canned reply (for wire-bring-up). |
+| `--real` | off | Use real faster-whisper (vs. the fake transcriber). |
+
+Expected output on each button-release capture:
+
+```
+uart transport listening on /dev/cu.usbmodem0001 @ 460800 baud (Ollama: http://192.168.1.129:11434 model=glm-4.7)
+[uart] captured 48000 samples (3000 ms, sr=16000)
+Paris is the capital of France.
+[uart] transcript='what is the capital of france' reply_len=30
+```
+
+Troubleshooting:
+
+* **`no serial device matched glob`** — the kit isn't enumerated, or the
+  port name changed. Run `ls /dev/cu.usbmodem*` to confirm, then pass
+  `--uart-port` explicitly. See `project_pse84_psram.md` for the typical
+  port names.
+* **Garbage hex / `expected X hex chars`** — baud mismatch. The firmware
+  baud is pinned in `zephyr_workspace/pse84_assistant/boards/*.overlay`;
+  the default here (460800) matches the `baud_fix` commit.
+* **Whisper downloads model on first run** — expected; ~150 MB for
+  `base.en`, cached under `~/.cache/huggingface`.
+
 ### bleak transport (requires hardware)
 
 Real L2CAP CoC client. Pass the peripheral's address:

@@ -22,6 +22,7 @@ from typing import Optional
 
 from .framing import Frame, FrameType, StreamingFrameParser, decode_frame
 from .pipeline import (
+    DEFAULT_SYSTEM_PROMPT,
     AssistantPipeline,
     DryRunLLM,
     OllamaLLM,
@@ -34,17 +35,44 @@ def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="assistant-bridge")
     p.add_argument(
         "--transport",
-        choices=("bleak", "file-inject"),
+        choices=("bleak", "file-inject", "uart"),
         default="file-inject",
-        help="Uplink source. 'bleak' requires a connected PSE84 kit.",
+        help=(
+            "Uplink source. 'bleak' requires a connected PSE84 kit; "
+            "'uart' reads the Phase 2 PCM_BEGIN/hex/PCM_END protocol over "
+            "/dev/cu.usbmodem*."
+        ),
     )
     p.add_argument("--input", type=Path, help="WAV path for --transport=file-inject")
     p.add_argument(
         "--ollama-url",
-        default=os.environ.get("OLLAMA_URL", "http://localhost:11434"),
+        default=os.environ.get(
+            "OLLAMA_URL", "http://192.168.1.129:11434"
+        ),
         help="Ollama base URL (env: OLLAMA_URL)",
     )
     p.add_argument("--ollama-model", default="glm-4.7")
+    p.add_argument(
+        "--system-prompt",
+        default=DEFAULT_SYSTEM_PROMPT,
+        help="System prompt sent to Ollama on every turn",
+    )
+    p.add_argument(
+        "--uart-port",
+        default=None,
+        help="Serial device (default: auto-glob /dev/cu.usbmodem*)",
+    )
+    p.add_argument(
+        "--uart-baud",
+        type=int,
+        default=460800,
+        help="UART baud (must match pse84_assistant firmware, default 460800)",
+    )
+    p.add_argument(
+        "--uart-port-glob",
+        default="/dev/cu.usbmodem*",
+        help="Glob used when --uart-port is not set",
+    )
     p.add_argument(
         "--dry-run-llm",
         action="store_true",
@@ -81,7 +109,11 @@ def _build_codecs(args: argparse.Namespace):
             reply=f"(dry-run) You said: '{args.fake_transcript}'. Canned reply."
         )
     else:
-        llm = OllamaLLM(base_url=args.ollama_url, model=args.ollama_model)
+        llm = OllamaLLM(
+            base_url=args.ollama_url,
+            model=args.ollama_model,
+            system_prompt=args.system_prompt,
+        )
     return opus, transcriber, llm
 
 
@@ -202,10 +234,124 @@ async def _run_bleak(args: argparse.Namespace) -> int:
     return 3
 
 
+def _resolve_uart_port(args: argparse.Namespace) -> Optional[str]:
+    """Resolve the serial port path for the UART transport.
+
+    Returns ``None`` if no port was supplied and the glob had no hits —
+    callers treat that as a fatal configuration error.
+    """
+    # Lazy import so the bridge still imports cleanly if the audio_capture
+    # tree is ever packaged separately.
+    from audio_capture.uart_protocol import find_serial_port
+
+    if args.uart_port:
+        return args.uart_port
+    return find_serial_port(args.uart_port_glob)
+
+
+def _make_uart_line_source(port: str, baud: int):
+    """Return an iterator of stripped ASCII lines from the serial port.
+
+    Factored out so ``_run_uart`` can be unit-tested by swapping in a
+    canned iterator. Blocks in the serial read loop; terminate via
+    ``KeyboardInterrupt``.
+    """
+    from audio_capture.uart_protocol import _serial_lines
+
+    return _serial_lines(port, baud)
+
+
+async def _run_uart(
+    args: argparse.Namespace,
+    *,
+    line_source_factory=None,
+) -> int:
+    """UART transport: read PCM captures from the PSE84 kit, transcribe,
+    stream the LLM reply to stdout.
+
+    ``line_source_factory`` lets tests inject a deterministic iterable
+    in place of the real serial read loop.
+    """
+    from audio_capture.uart_protocol import iter_captures
+
+    port: Optional[str] = None
+    if line_source_factory is None:
+        port = _resolve_uart_port(args)
+        if not port:
+            print(
+                f"ERROR: no serial device matched glob {args.uart_port_glob!r}",
+                file=sys.stderr,
+            )
+            return 2
+
+    opus, transcriber, llm = _build_codecs(args)
+    cfg = PipelineConfig(
+        ollama_url=args.ollama_url,
+        ollama_model=args.ollama_model,
+        text_chunk_bytes=args.text_chunk_bytes,
+        dry_run_llm=args.dry_run_llm,
+        system_prompt=args.system_prompt,
+    )
+
+    async def stdout_outbound(raw: bytes):
+        # Outbound frames are not needed for the Mac-side UART path — the
+        # LLM reply streams to stdout via on_token. Swallow the frames so
+        # process_pcm's TEXT_END/TEXT_CHUNK emissions don't spam stdout.
+        return
+
+    pipeline = AssistantPipeline(
+        config=cfg,
+        opus=opus,
+        transcriber=transcriber,
+        llm=llm,
+        on_outbound=stdout_outbound,
+    )
+
+    if line_source_factory is not None:
+        lines = line_source_factory()
+        source_desc = "(injected)"
+    else:
+        assert port is not None
+        lines = _make_uart_line_source(port, args.uart_baud)
+        source_desc = f"{port} @ {args.uart_baud} baud"
+
+    print(
+        f"uart transport listening on {source_desc} "
+        f"(Ollama: {args.ollama_url} model={args.ollama_model})",
+        file=sys.stderr,
+    )
+
+    async def on_token(tok: str) -> None:
+        # Stream each reply token to stdout as it arrives, no newline.
+        sys.stdout.write(tok)
+        sys.stdout.flush()
+
+    try:
+        for frame in iter_captures(lines):
+            print(
+                f"\n[uart] captured {frame.samples} samples "
+                f"({frame.duration_ms:.0f} ms, sr={frame.sample_rate})",
+                file=sys.stderr,
+            )
+            result = await pipeline.process_pcm(
+                frame.pcm, frame.sample_rate, on_token=on_token
+            )
+            print(
+                f"\n[uart] transcript={result.transcript!r} "
+                f"reply_len={len(result.reply_text)}",
+                file=sys.stderr,
+            )
+    except KeyboardInterrupt:
+        print("\n[uart] stopped", file=sys.stderr)
+    return 0
+
+
 async def _amain(argv: Optional[list[str]] = None) -> int:
     args = _build_parser().parse_args(argv)
     if args.transport == "file-inject":
         return await _run_file_inject(args)
+    if args.transport == "uart":
+        return await _run_uart(args)
     return await _run_bleak(args)
 
 
