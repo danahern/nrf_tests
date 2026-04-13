@@ -358,3 +358,76 @@ git submodule update --init --recursive zephyr_workspace/modules/libopus/opus
 - **No M33 companion / IPC**: sysbuild is NOT used in the native_sim
   path. Any Phase 0b IPC work must provide a native_sim stub (e.g., a
   Zephyr-side mock endpoint) before it can be exercised here.
+
+## Phase 2: PDM capture + UART hex dump
+
+Press and hold `sw0` to capture up to 2 s of mono 16 kHz 16-bit PCM from
+the PSE84's PDM microphone (controller 1 / channel 2, routed to the
+pdm3 alt-io pin p8_6 per the in-tree `samples/drivers/audio/dmic`
+reference overlay). Release to stop and stream the capture over the
+console UART as hex, bracketed by `=== PCM_BEGIN … ===` / `=== PCM_END
+===` markers. The companion host script
+`host/audio_capture/receive_pcm.py` reassembles the dump into a WAV and
+autoplays it — the entire loop verifies the PDM + DMA + UART path
+end-to-end without a BLE link.
+
+Firmware pieces:
+
+- `boards/kit_pse84_eval_pse846gps2dbzc4a_m55.overlay` enables `dmic0`
+  + `dmic0_ch2` (with `use-alt-io`), routes `clk_hf7` through
+  `peri1_group1_16_5bit_2`, enables `dma0`, and bumps `uart2` to 921600
+  baud. It also re-roots `gfxss` from under `dmic0` to `/soc` as a
+  workaround for an upstream DMIC-driver / SoC-DTSI collision (the
+  driver's `DT_FOREACH_CHILD_STATUS_OKAY` iterator treats every
+  status=okay child of `pdm@44400000` as a PDM channel).
+- `src/audio.c` owns a 2 s (64 KB) BSS ring buffer, a dedicated
+  capture thread that drains 100 ms blocks from `dmic_read()`, and a
+  `printk()`-based hex dumper (avoids the log subsystem's drop-under-
+  burst failure mode).
+- `src/main.c` wires the `gpio_keys` press/release edges to
+  `audio_capture_start()` / `audio_capture_stop()`, deferring the stop
+  + dump to the system workqueue to keep the input thread responsive.
+  A `k_timer` enforces the 2 s cap if the user holds the button too
+  long; press-shorter-than-100 ms captures are padded with trailing
+  silence.
+
+Run the host side (macOS):
+
+```bash
+# pyserial is in the project's zephyr-env pyenv venv.
+~/.pyenv/versions/3.11.11/envs/zephyr-env/bin/python3 \
+    host/audio_capture/receive_pcm.py
+# -> "listening on /dev/cu.usbmodem1103 @ 921600 baud"
+# hold sw0 on the kit, speak, release
+# -> "captured N samples (M ms), peak=P, wav=…/captures/<ts>.wav"
+# afplay auto-plays the WAV on macOS; aplay on Linux.
+```
+
+Unit tests for the hex-parse + WAV-write path live in
+`host/audio_capture/tests/` and run with the system Python 3 (stdlib
+only):
+
+```bash
+python3 -m unittest host.audio_capture.tests.test_receive_pcm -v
+```
+
+### Known issue: 921600 baud stability on KitProg3
+
+The in-tree Infineon CAT1 UART driver's oversample search (see
+`drivers/serial/uart_infineon_pdl.c`,
+`IFX_UART_MAX_BAUD_PERCENT_DIFFERENCE = 10U`) accepts divider choices
+up to 10 % off the requested baud. Empirically, the KitProg3 CDC
+bridge on `kit_pse84_eval` ships UART traffic at 921600 with
+intermittent single-byte corruption under sustained bursts, consistent
+with a ~1 % baud drift. The framing is robust (`receive_pcm.py` drops
+lines that don't parse as pure hex and retries on the next frame), but
+for a large (~128 KB) hex payload one corrupted byte is sufficient to
+fail a single capture. Follow-ups to evaluate:
+
+- Override `&peri0_group1_16bit_0 { clock-div = … }` in the app
+  overlay so the SCB UART's integer divider lands exactly on 921600.
+- Fall back to 460800 baud (observed clean at 115200) if the clock
+  tree can't be tuned — the hex dump still finishes in ~3 s.
+- Switch to an RTT backend for the PCM payload (log over SWD instead
+  of UART). `CONFIG_USE_SEGGER_RTT=y` is a one-line change and
+  bypasses the CDC bridge entirely.

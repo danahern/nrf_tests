@@ -23,6 +23,10 @@
 
 #include "state.h"
 
+#ifdef CONFIG_AUDIO_DMIC
+#include "audio.h"
+#endif
+
 #ifdef CONFIG_LVGL
 #include <zephyr/device.h>
 #include <zephyr/drivers/display.h>
@@ -43,6 +47,46 @@
 LOG_MODULE_REGISTER(pse84_assistant, LOG_LEVEL_INF);
 
 #ifdef CONFIG_LVGL
+
+#ifdef CONFIG_AUDIO_DMIC
+/* Auto-stop timer: enforces the 2 s capture cap if the user holds the
+ * button longer. Runs from ISR context; defers the actual stop to the
+ * system workqueue so audio_capture_stop() (which does a bulk printk
+ * hex dump) executes in a thread.
+ */
+static void audio_autostop_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+	if (audio_is_capturing()) {
+		LOG_INF("audio cap at %d ms — auto-stopping", AUDIO_MAX_DURATION_MS);
+		(void)audio_capture_stop();
+	}
+}
+
+static K_WORK_DEFINE(audio_autostop_work, audio_autostop_work_handler);
+
+static void audio_autostop_timer_cb(struct k_timer *t)
+{
+	ARG_UNUSED(t);
+	k_work_submit(&audio_autostop_work);
+}
+
+static K_TIMER_DEFINE(audio_autostop_timer, audio_autostop_timer_cb, NULL);
+
+/* Same deferred pattern for the stop-on-release path, because the input
+ * callback runs in the input subsystem's thread and audio_capture_stop()
+ * does a 60 KB printk dump we don't want to block that thread on.
+ */
+static void audio_stop_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+	k_timer_stop(&audio_autostop_timer);
+	(void)audio_capture_stop();
+}
+
+static K_WORK_DEFINE(audio_stop_work, audio_stop_work_handler);
+#endif /* CONFIG_AUDIO_DMIC */
+
 static void button_input_cb(struct input_event *evt, void *user_data)
 {
 	ARG_UNUSED(user_data);
@@ -50,11 +94,31 @@ static void button_input_cb(struct input_event *evt, void *user_data)
 	if (evt->type != INPUT_EV_KEY || evt->code != INPUT_KEY_0) {
 		return;
 	}
-	/* evt->value: 1 = pressed, 0 = released. Cycle on press edge only. */
+	/* evt->value: 1 = pressed, 0 = released.
+	 *
+	 * Press edge: cycle the visual state machine AND (if audio is
+	 * compiled in) arm a PDM capture. The state machine keeps its
+	 * existing Phase 1 round-robin — audio capture is independent
+	 * per Phase 2 scope.
+	 *
+	 * Release edge: stop + dump the capture.
+	 */
 	if (evt->value == 1) {
 		const assist_state_t next = state_cycle();
 
 		LOG_INF("button press -> %s", state_name(next));
+#ifdef CONFIG_AUDIO_DMIC
+		if (audio_capture_start() == 0) {
+			k_timer_start(&audio_autostop_timer,
+				      K_MSEC(AUDIO_MAX_DURATION_MS), K_NO_WAIT);
+		}
+#endif
+	} else if (evt->value == 0) {
+#ifdef CONFIG_AUDIO_DMIC
+		if (audio_is_capturing()) {
+			k_work_submit(&audio_stop_work);
+		}
+#endif
 	}
 }
 INPUT_CALLBACK_DEFINE(NULL, button_input_cb, NULL);
@@ -105,6 +169,12 @@ int main(void)
 	}
 
 	ui_init();
+
+#ifdef CONFIG_AUDIO_DMIC
+	if (audio_init() != 0) {
+		LOG_ERR("audio_init failed; PDM capture disabled");
+	}
+#endif
 
 	/* First flush before unblanking to avoid a frame of garbage. */
 	ui_tick();
