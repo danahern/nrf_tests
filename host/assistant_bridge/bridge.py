@@ -51,7 +51,7 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
         help="Ollama base URL (env: OLLAMA_URL)",
     )
-    p.add_argument("--ollama-model", default="glm-4.7")
+    p.add_argument("--ollama-model", default="glm-4.7-flash:latest")
     p.add_argument(
         "--system-prompt",
         default=DEFAULT_SYSTEM_PROMPT,
