@@ -49,6 +49,28 @@ static struct k_thread link_thread;
 static k_tid_t link_thread_id;
 static K_SEM_DEFINE(link_sem, 0, 1);
 
+/* After TEXT_END we stay in RESPONDING for RESPONDING_HOLD_MS so the
+ * user sees the full reply, then auto-transition to IDLE. A button
+ * press in the meantime pre-empts this via main.c's press handler
+ * (which sets LISTENING directly + cancels our delayed work).
+ */
+#define RESPONDING_HOLD_MS 5000
+static void link_idle_revert_handler(struct k_work *w);
+static K_WORK_DELAYABLE_DEFINE(link_idle_revert, link_idle_revert_handler);
+
+static void link_idle_revert_handler(struct k_work *w)
+{
+	ARG_UNUSED(w);
+	if (state_get() == ASSIST_RESPONDING) {
+		state_set(ASSIST_IDLE);
+	}
+}
+
+void link_cancel_idle_revert(void)
+{
+	k_work_cancel_delayable(&link_idle_revert);
+}
+
 static size_t ring_count(void)
 {
 	int h = atomic_get(&link_ring_head);
@@ -74,9 +96,14 @@ static void ring_push_byte(uint8_t b)
 	atomic_set(&link_ring_head, next_h);
 }
 
+static atomic_t link_irq_count;
+static atomic_t link_bytes_count;
+static atomic_t link_frames_count;
+
 static void link_uart_cb(const struct device *dev, void *user_data)
 {
 	ARG_UNUSED(user_data);
+	atomic_inc(&link_irq_count);
 	uart_irq_update(dev);
 	if (!uart_irq_rx_ready(dev)) {
 		return;
@@ -88,6 +115,7 @@ static void link_uart_cb(const struct device *dev, void *user_data)
 		ring_push_byte(buf[i]);
 	}
 	if (n > 0) {
+		atomic_add(&link_bytes_count, n);
 		k_sem_give(&link_sem);
 	}
 }
@@ -97,6 +125,7 @@ static void link_frame_cb(uint8_t type, uint8_t seq, const uint8_t *payload,
 {
 	ARG_UNUSED(seq);
 	ARG_UNUSED(user);
+	atomic_inc(&link_frames_count);
 	switch (type) {
 	case FRAME_TYPE_TEXT_CHUNK:
 		/* First chunk of a new reply: transition into RESPONDING
@@ -110,12 +139,13 @@ static void link_frame_cb(uint8_t type, uint8_t seq, const uint8_t *payload,
 		ui_append_reply_text((const char *)payload, (int)len);
 		break;
 	case FRAME_TYPE_TEXT_END:
-		LOG_INF("TEXT_END (reply complete)");
-		state_set(ASSIST_IDLE);
-		/* Keep the text on screen briefly in IDLE so the user sees
-		 * the final reply before returning to the idle animation —
-		 * ui_clear_reply_text happens on the next LISTENING entry.
+		LOG_INF("TEXT_END (reply complete) — RESPONDING hold %d ms",
+			RESPONDING_HOLD_MS);
+		/* Stay in RESPONDING for RESPONDING_HOLD_MS so the user sees
+		 * the full reply, then auto-transition to IDLE. A new press
+		 * in the meantime cancels this work.
 		 */
+		k_work_schedule(&link_idle_revert, K_MSEC(RESPONDING_HOLD_MS));
 		break;
 	case FRAME_TYPE_CTRL_STATE:
 	case FRAME_TYPE_CTRL_START_LISTEN:
@@ -137,9 +167,28 @@ static void link_thread_fn(void *a, void *b, void *c)
 	ARG_UNUSED(c);
 
 	uint8_t tmp[128];
+	int64_t last_hb_ms = k_uptime_get();
 
 	while (1) {
-		k_sem_take(&link_sem, K_FOREVER);
+		/* Heartbeat every 2 s so we can see from serial whether the
+		 * UART IRQ is firing and frames are being parsed. Wake every
+		 * 500 ms to check even if the ring is empty.
+		 */
+		int ret = k_sem_take(&link_sem, K_MSEC(500));
+
+		int64_t now = k_uptime_get();
+
+		if (now - last_hb_ms >= 2000) {
+			LOG_INF("link hb: irq=%u bytes=%u frames=%u ring=%u",
+				(unsigned)atomic_get(&link_irq_count),
+				(unsigned)atomic_get(&link_bytes_count),
+				(unsigned)atomic_get(&link_frames_count),
+				(unsigned)ring_count());
+			last_hb_ms = now;
+		}
+		if (ret != 0) {
+			continue;
+		}
 
 		while (ring_count() > 0) {
 			/* Drain into tmp[] — up to 128 bytes at a time. */

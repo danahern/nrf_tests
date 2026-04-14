@@ -111,7 +111,12 @@ static void button_input_cb(struct input_event *evt, void *user_data)
 		 * machine no longer auto-cycles through states — transitions
 		 * are driven by real events: press/release and incoming
 		 * TEXT_CHUNK/TEXT_END frames from the host bridge.
+		 *
+		 * Entry side-effect: wipe any reply text from the previous
+		 * query so the next RESPONDING starts fresh.
 		 */
+		ui_clear_reply_text();
+		link_cancel_idle_revert();
 		state_set(ASSIST_LISTENING);
 		LOG_INF("button press -> LISTENING");
 #ifdef CONFIG_AUDIO_DMIC

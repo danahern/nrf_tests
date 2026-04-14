@@ -18,4 +18,9 @@
 
 int link_init(void);
 
+/* Cancel the post-TEXT_END 5 s idle revert timer. Called from the
+ * press handler so a new query takes priority over the pending revert.
+ */
+void link_cancel_idle_revert(void);
+
 #endif /* PSE84_ASSISTANT_LINK_H_ */
