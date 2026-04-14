@@ -1,0 +1,7 @@
+/*
+ * Per-app M33NS board overlay. Sysbuild typically ignores this for
+ * companion images on kit_pse84_eval — the load-bearing overrides live
+ * in pse84_assistant/sysbuild/enable_cm55.overlay instead. This file
+ * exists only so the board-overlay file name is present for anyone
+ * grepping around; leave it empty on purpose.
+ */
