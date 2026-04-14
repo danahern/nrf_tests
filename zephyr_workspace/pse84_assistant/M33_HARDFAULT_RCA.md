@@ -1,16 +1,14 @@
-# M33 Companion HardFault — Root-Cause Analysis
+# M33 Companion HardFault — RCA + Fix Applied
 
-**Status:** Root cause identified with high confidence from static code
-review of the Infineon SoC bring-up. A clean fix requires editing
-`zephyr/soc/infineon/edge/pse84/security_config/pse84_boot.c` or
-`pse84_s_protection.c` — Phase 0a explicitly excludes Infineon SoC
-changes, so the remediation is deferred to **Phase 0b**.
+**Status:** Root cause confirmed on Zephyr fork `pse84-gfxss-display-driver`
+at commit `fae9ce777c6` — see **Section 5** for the applied patch. The
+openocd "clearing lockup after double fault" message that accompanied
+every reset before this fix is gone.
 
-## 1. Symptom
+Original RCA below (Phase 0a, sections 1-4) is retained as archaeology.
 
-Reported on `enable_cm55` sysbuild companion (M33, Secure world) built
-from `samples/basic/minimal` with `CONFIG_SOC_PSE84_M55_ENABLE=y`.
-Observed state ~8 s after reset, M55 happily running the display:
+---
+
 
 ```
 [cat1d.cm33] halted due to debug-request, current mode: Handler HardFault
@@ -214,3 +212,49 @@ display_write), re-open this RCA.
 - `zephyr/boards/infineon/kit_pse84_eval/kit_pse84_eval_m33_defconfig`
 - Memory notes: `project_pse84_m33_hardfault.md`,
   `project_pse84_sysbuild_path.md`.
+
+---
+
+## 5. Applied Fix (Phase 0b.6)
+
+Commit `fae9ce777c6` on `danahern/zephyr#pse84-gfxss-display-driver` —
+one surgical edit to `soc/infineon/edge/pse84/security_config/pse84_boot.c`
+immediately before the two PPC-init calls:
+
+```c
+    __disable_irq();
+
+    /* Configure PPC for NS*/
+    cy_ppc0_init();
+    cy_ppc1_init();
+```
+
+Rationale (matching Section 2's option 1):
+
+- By the time we reach the PPC-init block, `Cy_SysEnableCM55()` has
+  already released M55. M33 has no further useful work; it falls
+  through into the bottom-of-function `for (;;) {}` spin.
+- Disabling IRQs permanently at this point can't drop a useful
+  interrupt — M33 isn't consuming any. Secure IRQs that were armed
+  earlier for bring-up are no longer needed.
+- The PPC re-attribution can now safely rewrite all PERI0/1 regions
+  without risk of a vector fetch into a newly-denied region.
+
+Observed on kit_pse84_eval/pse846gps2dbzc4a/m55 with the voice
+assistant sysbuild companion:
+
+- **Before:** `openocd -c 'init; reset run; shutdown'` prints
+  `Error: [cat1d.cm33] clearing lockup after double fault` on every
+  reset. M55 boots anyway because it was released before the fault.
+- **After:** Clean reset, no lockup message, M55 boots as expected.
+
+Blast-radius audit: every PSE84 app that uses `enable_cm55` as a
+sysbuild companion (pse84_cartoon_test, pse84_video_test,
+pse84_display, pse84_i2c_test, pse84_psram_test, pse84_assistant,
+pse84_dmic_test). None of them register Secure-side IRQs that need
+to fire post-handoff — the companion's sole job is boot + clock +
+CM55 enable.
+
+Phase 0b.7+ work can now safely layer a real M33 application image
+alongside (or replacing) `enable_cm55`: `ipc_service` peer, BLE
+host, wake-word path, etc.
