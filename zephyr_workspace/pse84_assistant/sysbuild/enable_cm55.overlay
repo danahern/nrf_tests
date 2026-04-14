@@ -1,46 +1,77 @@
 /*
- * M33 companion overlay: force CLK_HF12 to run at 25 MHz.
+ * M33NS companion overlay (applied by sysbuild to the enable_cm55 image
+ * when that image's board is kit_pse84_eval/.../m33/ns).
  *
- * The demo uses external 24 MHz oscillator via CLKPATH4 → CLK_HF12, which
- * feeds the MIPI-DSI D-PHY PLL reference. Zephyr's board DTS sets HF12 to
- * CLKPATH4 too, but the path_mux4 source defaults to no running clock →
- * HF12 = 0 Hz → D-PHY PLL never locks → cy_mipi_dsi_dphy_enable() waits
- * forever in its unbounded PHY_LOCK polling loop.
- *
- * Fix: route CLK_HF12 to CLKPATH0 (DPLL_LP0 = 400 MHz) with divide-by-16
- * to get 25 MHz — close enough to 24 MHz for the D-PHY PLL lock range.
+ * The NS board DTS does NOT include kit_pse84_eval_common.dtsi, so it
+ * has no uart2 label or pinctrl config. We bring in uart2 here using
+ * the NS alias of scb2 (pse84.dtsi: scb@429a0000), and add the IPC
+ * shared-memory + mbox nodes so ipc_service can bridge M55 <-> M33NS.
  */
 
 #include <zephyr/dt-bindings/clock/ifx_clock_source_common.h>
 
+/*
+ * CLK_HF12 -> 25 MHz for the MIPI-DSI D-PHY PLL reference (M55 uses
+ * this). Routed via CLKPATH0 (DPLL_LP0 400 MHz) / 16.
+ */
 &clk_hf12 {
 	source-path = <IFX_CLK_HF_IN_CLKPATH0>;
 	clock-div = <IFX_CLK_HF_DIVIDE_BY_16>;
 	status = "okay";
 };
 
-&uart2 {
+/*
+ * uart2: P6.7 TX / P6.5 RX, same pins the M55 console uses. On PSE84
+ * both cores can drive the SCB2 UART via the NS (0x429a0000) and
+ * Secure (0x529a0000) aliases; we pick NS here.
+ *
+ * TF-M owns uart2 during its own secure init/banner; once control is
+ * handed off to Zephyr NS, Zephyr's uart driver takes over SCB2 and
+ * becomes the live writer. Baud must match what M55 expects on the
+ * shared wire (460800).
+ */
+&scb2 {
+	compatible = "infineon,uart";
+	status = "okay";
 	current-speed = <460800>;
+	clocks = <&peri0_group1_16bit_0>;
+	pinctrl-0 = <&p6_7_scb2_uart_tx &p6_5_scb2_uart_rx>;
+	pinctrl-names = "default";
 };
 
-/*
- * Phase 0b.8: M33 side of the assistant ipc_service endpoint.
- *
- * Mirrors the M55 overlay's mbox + ipc nodes with TX/RX channels
- * swapped so the icmsg ring matches end-to-end:
- *   M55 TX (ch9)  -> M33 RX (ch9)
- *   M55 RX (ch10) -> M33 TX (ch10)
- *
- * NVIC IRQ 1 = m33syscpuss_interrupts_ipc_dpslp_0_IRQn (DeepSleep
- * table per cy_device_headers_ns.h). intr-index=0 matches the M55
- * side; each CPU has its own per-CPU intr struct 0.
- *
- * Lives here (sysbuild/) rather than pse84_assistant_m33/boards/
- * because sysbuild auto-applies <image>.overlay but the per-app
- * boards/<board>.overlay convention isn't picked up for the M33
- * companion image on this kit.
- */
+&peri0_group1_16bit_0 {
+	status = "okay";
+	clock-div = <1>;
+};
+
+&p6_7_scb2_uart_tx {
+	drive-push-pull;
+};
+
+&p6_5_scb2_uart_rx {
+	input-enable;
+};
+
 / {
+	chosen {
+		zephyr,console = &scb2;
+		zephyr,uart-mcumgr = &scb2;
+	};
+
+	/*
+	 * Phase 0b.8: M33NS side of the assistant ipc_service endpoint.
+	 *
+	 * IPC MMIO lives at 0x422a0000 on the NS alias (vs 0x441d0000 on
+	 * M55). The PDL Cy_IPC_Drv_* helpers dispatch through each CPU's
+	 * own view so the reg value here is informational.
+	 *
+	 * TX/RX channels are swapped relative to M55:
+	 *   M55 TX (ch9)  -> M33 RX (ch9)
+	 *   M55 RX (ch10) -> M33 TX (ch10)
+	 *
+	 * NVIC IRQ 1 = m33syscpuss_interrupts_ipc_dpslp_0_IRQn per
+	 * cy_device_headers_ns.h.
+	 */
 	soc {
 		pse84_mbox: mbox@422a0000 {
 			compatible = "infineon,pse84-mbox";
