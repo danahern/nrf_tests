@@ -264,4 +264,41 @@ dmic_dev: &dmic0 {
 			status = "okay";
 		};
 	};
+
+	/*
+	 * Phase 0b.3/4: ipc_service icmsg endpoint using the shared-memory
+	 * regions pinned in docs/ipc_design.md — 4 KiB each at 0x240fe000
+	 * (M33 -> M55, RX from our perspective) and 0x240ff000 (M55 -> M33,
+	 * TX). mboxes reference the two channels listed in pse84_mbox's
+	 * channels-used array (cell 0 = CY_IPC_CHAN_USER for signal/notify
+	 * toward M33, cell 1 = CY_IPC_CHAN_USER+1 for receive-from-M33).
+	 * At boot the subsystem initialises and waits for the peer; M33 app
+	 * image lands in Phase 0b.5+.
+	 */
+	reserved-memory {
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		ipc_rx: memory@240fe000 {
+			reg = <0x240fe000 0x1000>;
+		};
+		ipc_tx: memory@240ff000 {
+			reg = <0x240ff000 0x1000>;
+		};
+	};
+
+	/* `ipc0` label is reserved by the PSE84 SoC DTSI for the IPC0
+	 * peripheral; our ipc_service endpoint uses a distinct label
+	 * (assistant_ipc0) to avoid the collision.
+	 */
+	ipc {
+		assistant_ipc0: assistant_ipc0 {
+			compatible = "zephyr,ipc-icmsg";
+			tx-region = <&ipc_tx>;
+			rx-region = <&ipc_rx>;
+			mboxes = <&pse84_mbox 1>, <&pse84_mbox 0>;
+			mbox-names = "rx", "tx";
+			status = "okay";
+		};
+	};
 };
