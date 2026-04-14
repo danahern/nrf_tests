@@ -1,0 +1,32 @@
+/*
+ * PSE84 Voice Assistant — M33 companion board overlay.
+ *
+ * Mirrors sysbuild/enable_cm55.overlay from pse84_assistant: route
+ * CLK_HF12 to CLKPATH0 (DPLL_LP0 = 400 MHz) divided by 16 to yield
+ * 25 MHz — close enough to the external 24 MHz oscillator spec for
+ * the MIPI-DSI D-PHY PLL reference on CLKPATH4.
+ *
+ * Without this override CLK_HF12 defaults to the CLKPATH4 source that
+ * is not running, so HF12 = 0 Hz and Cy_MIPI_DSI_Dphy_Enable() spins
+ * forever in its unbounded PHY_LOCK polling loop.
+ */
+
+#include <zephyr/dt-bindings/clock/ifx_clock_source_common.h>
+
+&clk_hf12 {
+	source-path = <IFX_CLK_HF_IN_CLKPATH0>;
+	clock-div = <IFX_CLK_HF_DIVIDE_BY_16>;
+	status = "okay";
+};
+
+/*
+ * M55 overrides uart2 to 460800 baud for the Phase 2 PCM hex dump.
+ * Both cores share uart2 as console (hardware contention: whichever
+ * core writes first wins; occasional interleaved bytes are expected).
+ * Match the baud here so M33 printk output is at least decodable by
+ * the host serial monitor. Longer-term fix: route M33 console to a
+ * different SCB or forward M33 logs to M55 via ipc_service.
+ */
+&uart2 {
+	current-speed = <460800>;
+};
