@@ -57,14 +57,19 @@ LOG_MODULE_REGISTER(audio, LOG_LEVEL_INF);
  */
 K_MEM_SLAB_DEFINE_STATIC(audio_mem_slab, AUDIO_BLOCK_BYTES, AUDIO_BLOCK_COUNT, 4);
 
-/* 2 s mono s16 ring buffer. 64 KB — fits comfortably in M55 SRAM
- * (kit_pse84_eval_m55 has ~1 MB zephyr,sram per the board dtsi chain).
- * We don't put this in PSRAM because (a) PSRAM init path is still
- * flaky across the M33 companion hardfault path (see
- * project_pse84_m33_hardfault.md), and (b) 64 KB is trivially small.
- * BSS is zeroed at boot so an "unused" ring starts silent.
+/*
+ * 2 s mono s16 ring buffer. 64 KB — pinned at the SOCMEM_AUDIO node
+ * declared in the M55 overlay so the Zephyr BT stack's heap can keep
+ * the 132 KB on-chip SRAM. The M55 linker does not own SOCMEM, so we
+ * follow the same raw-pointer pattern as sprites.c instead of
+ * Z_GENERIC_SECTION.
  */
+#if DT_NODE_EXISTS(DT_NODELABEL(socmem_audio))
+static int16_t * const audio_ring =
+	(int16_t *)DT_REG_ADDR(DT_NODELABEL(socmem_audio));
+#else
 static int16_t audio_ring[AUDIO_RING_BYTES / sizeof(int16_t)];
+#endif
 static size_t audio_ring_samples;  /* samples currently filled */
 static int64_t audio_capture_start_ms;
 static int64_t audio_capture_stop_ms;

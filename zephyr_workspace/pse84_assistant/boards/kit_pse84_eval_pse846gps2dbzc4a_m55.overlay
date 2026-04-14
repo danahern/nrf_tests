@@ -85,6 +85,18 @@ i2c0: &scb0 {
 			reg = <0x26340000 DT_SIZE_K(1024)>;
 			zephyr,memory-region = "SOCMEM_SPRITE";
 		};
+
+		/*
+		 * Phase 4: 64 KiB PCM ring in SOCMEM, immediately past the
+		 * sprite scratch region. Keeps audio.c's 2 s capture buffer
+		 * out of the 132 KB M55 SRAM so the Zephyr BT stack has
+		 * room to breathe.
+		 */
+		socmem_audio: memory@26440000 {
+			compatible = "zephyr,memory-region", "mmio-sram";
+			reg = <0x26440000 DT_SIZE_K(64)>;
+			zephyr,memory-region = "SOCMEM_AUDIO";
+		};
 	};
 };
 

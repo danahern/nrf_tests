@@ -16,6 +16,7 @@ target_sources(app PRIVATE
     src/audio.c
     src/link.c
     src/log_tunnel.c
+    src/ble.c
 )
 
 # ui.c pulls in LVGL headers unconditionally; only compile it when

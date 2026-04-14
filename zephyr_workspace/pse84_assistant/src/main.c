@@ -34,6 +34,7 @@
 
 #include "link.h"
 #include "log_tunnel.h"
+#include "ble.h"
 
 #ifdef CONFIG_LVGL
 #include <zephyr/device.h>
@@ -247,6 +248,10 @@ int main(void)
 		}
 	}
 #endif
+
+	if (ble_init() != 0) {
+		LOG_ERR("ble_init failed; Phase 4 BLE disabled");
+	}
 
 	/* First flush before unblanking to avoid a frame of garbage. */
 	ui_tick();
