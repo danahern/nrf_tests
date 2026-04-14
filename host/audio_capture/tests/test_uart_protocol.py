@@ -47,11 +47,16 @@ class TestIterCaptures(unittest.TestCase):
         lines = _make_frame_lines([1, 2, 3])[:-1]
         self.assertEqual(list(uart_protocol.iter_captures(lines)), [])
 
-    def test_malformed_hex_length_raises(self):
+    def test_malformed_hex_length_is_lenient(self):
+        # Lenient parser: short payload → zero-padded, caller still sees
+        # a PcmFrame with the header-declared sample count so the bridge
+        # survives occasional UART byte loss during the PCM hex burst.
         lines = _make_frame_lines([1, 2, 3])
-        lines[1] = lines[1][:-2]  # corrupt hex payload length
-        with self.assertRaises(ValueError):
-            list(uart_protocol.iter_captures(lines))
+        lines[1] = lines[1][:-2]
+        frames = list(uart_protocol.iter_captures(lines))
+        assert len(frames) == 1
+        assert frames[0].samples == 3
+        assert len(frames[0].pcm) == 6
 
     def test_resyncs_across_begin_restart(self):
         """A new BEGIN without a preceding END should discard the partial

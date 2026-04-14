@@ -74,13 +74,28 @@ class TestParseFrame(unittest.TestCase):
         with self.assertRaises(ValueError):
             receive_pcm.parse_frame(lines)
 
-    def test_wrong_length_raises(self):
+    def test_short_payload_is_zero_padded(self):
+        # Parser is now lenient: rather than raise, short payloads are
+        # zero-padded so the bridge stays alive through occasional UART
+        # byte loss on the PSE84 hex-dump burst.
         samples = [1, 2, 3]
         lines = _make_frame_lines(samples)
-        # Corrupt the hex payload to be the wrong length.
         lines[1] = lines[1][:-2]  # drop one byte's worth of hex
-        with self.assertRaises(ValueError):
-            receive_pcm.parse_frame(lines)
+        frame = receive_pcm.parse_frame(lines)
+        assert frame is not None
+        assert frame.samples == 3
+        # Last sample gets its low byte zero'd out by the pad; sample
+        # count is preserved so downstream code (WAV writer, Whisper)
+        # sees a correctly-sized buffer.
+        assert len(frame.pcm) == 3 * 2
+
+    def test_truncates_overlong_payload(self):
+        samples = [1, 2, 3]
+        lines = _make_frame_lines(samples)
+        lines[1] = lines[1] + "deadbeef"  # extra hex
+        frame = receive_pcm.parse_frame(lines)
+        assert frame is not None
+        assert len(frame.pcm) == 3 * 2
 
 
 class TestPeak(unittest.TestCase):

@@ -170,10 +170,29 @@ def parse_frame(lines: Iterable[str]) -> Optional[PcmFrame]:
         raise ValueError("PCM_BEGIN seen but no matching PCM_END")
 
     hex_payload = "".join(hex_chunks)
+    # Be lenient: if the payload is short (UART byte loss on bursty
+    # sends) truncate or pad to the header-declared length rather than
+    # killing the whole session. For ASR the missing 10-50 ms of audio
+    # is usually tolerable; it only matters for the peak metric and
+    # sample count. Round down so bytes.fromhex gets an even-length
+    # string.
     if len(hex_payload) != expected_hex_chars:
-        raise ValueError(
-            f"expected {expected_hex_chars} hex chars, got {len(hex_payload)}"
+        import sys as _sys
+        delta = len(hex_payload) - expected_hex_chars
+        _sys.stderr.write(
+            f"[uart_protocol] hex-len mismatch: header expects "
+            f"{expected_hex_chars}, got {len(hex_payload)} ({delta:+d}); "
+            "truncating/padding and continuing\n"
         )
+        if len(hex_payload) > expected_hex_chars:
+            hex_payload = hex_payload[:expected_hex_chars]
+        else:
+            # Pad with zeros to keep WAV length honest.
+            pad = expected_hex_chars - len(hex_payload)
+            if pad % 2 != 0:
+                pad -= 1
+                hex_payload = hex_payload[:-1]
+            hex_payload = hex_payload + ("00" * (pad // 2))
     pcm = bytes.fromhex(hex_payload)
     return PcmFrame(samples=samples, sample_rate=sr, channels=ch, bits=bits, pcm=pcm)
 
