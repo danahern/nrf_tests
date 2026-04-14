@@ -21,6 +21,11 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 
+#if defined(CONFIG_IPC_SERVICE)
+#include <zephyr/device.h>
+#include <zephyr/ipc/ipc_service.h>
+#endif
+
 #include "state.h"
 
 #ifdef CONFIG_AUDIO_DMIC
@@ -207,6 +212,39 @@ int main(void)
 	if (link_init() != 0) {
 		LOG_ERR("link_init failed; host text replies won't render");
 	}
+
+#if defined(CONFIG_IPC_SERVICE)
+	/* Phase 0b.7: prove ipc_service + mbox stack opens cleanly on M55.
+	 * Endpoint "assistant" is register-only — there's no M33 peer yet,
+	 * so .bound never fires and .received is wired but idle. Once the
+	 * M33 peer image lands, this same hook set will carry real traffic.
+	 */
+	{
+		const struct device *ipc_dev =
+			DEVICE_DT_GET(DT_NODELABEL(assistant_ipc0));
+		static struct ipc_ept ipc_ep;
+		static const struct ipc_ept_cfg ipc_cfg = {
+			.name = "assistant",
+			.cb = {
+				.bound = NULL,
+				.received = NULL,
+			},
+			.priv = NULL,
+		};
+
+		if (!device_is_ready(ipc_dev)) {
+			LOG_WRN("ipc_service: assistant_ipc0 not ready");
+		} else if (ipc_service_open_instance(ipc_dev) < 0) {
+			LOG_WRN("ipc_service_open_instance failed");
+		} else if (ipc_service_register_endpoint(ipc_dev, &ipc_ep,
+							 &ipc_cfg) < 0) {
+			LOG_WRN("ipc_service_register_endpoint failed");
+		} else {
+			LOG_INF("ipc_service: 'assistant' endpoint registered "
+				"(peer: M33 — awaiting handshake)");
+		}
+	}
+#endif
 
 	/* First flush before unblanking to avoid a frame of garbage. */
 	ui_tick();
