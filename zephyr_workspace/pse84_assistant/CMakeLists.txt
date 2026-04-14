@@ -14,6 +14,7 @@ target_sources(app PRIVATE
     src/framing.c
     src/opus_wrapper.c
     src/audio.c
+    src/link.c
 )
 
 # ui.c pulls in LVGL headers unconditionally; only compile it when

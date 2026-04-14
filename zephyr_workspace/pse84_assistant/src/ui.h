@@ -28,4 +28,15 @@ void ui_init(void);
 /* Drive LVGL timers. Call from the main loop at ~100 Hz. */
 void ui_tick(void);
 
+/* Append a UTF-8 text chunk to the RESPONDING-state reply label. Safe to
+ * call before the state actually enters RESPONDING — the accumulator
+ * survives the state swap. Thread-safe via an internal mutex.
+ */
+void ui_append_reply_text(const char *utf8, int len);
+
+/* Clear the reply label. Called on TEXT_END or when the IDLE state is
+ * entered so the next utterance starts fresh.
+ */
+void ui_clear_reply_text(void);
+
 #endif /* PSE84_ASSISTANT_UI_H_ */

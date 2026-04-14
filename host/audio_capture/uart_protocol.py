@@ -257,14 +257,24 @@ def _serial_lines(port: str, baud: int) -> Iterator[str]:
     import serial  # local import — tests don't need pyserial installed
 
     with serial.Serial(port, baudrate=baud, timeout=1) as ser:
-        while True:
-            raw = ser.readline()
-            if not raw:
-                continue
-            try:
-                yield raw.decode("ascii", errors="replace").rstrip("\r\n")
-            except Exception:
-                continue
+        yield from _serial_lines_from(ser)
+
+
+def _serial_lines_from(ser) -> Iterator[str]:
+    """Readline loop over an already-open pyserial instance.
+
+    Lets the caller keep the handle (to also write frames back for
+    duplex protocols) instead of giving exclusive ownership to the
+    read loop.
+    """
+    while True:
+        raw = ser.readline()
+        if not raw:
+            continue
+        try:
+            yield raw.decode("ascii", errors="replace").rstrip("\r\n")
+        except Exception:
+            continue
 
 
 def iter_captures_from_serial(port: str, baud: int) -> Iterator[PcmFrame]:

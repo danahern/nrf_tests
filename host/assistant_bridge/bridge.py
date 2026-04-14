@@ -311,18 +311,37 @@ async def _run_uart(
         system_prompt=args.system_prompt,
     )
 
-    async def stdout_outbound(raw: bytes):
-        # Outbound frames are not needed for the Mac-side UART path — the
-        # LLM reply streams to stdout via on_token. Swallow the frames so
-        # process_pcm's TEXT_END/TEXT_CHUNK emissions don't spam stdout.
-        return
+    # Open ONE pyserial handle for both directions — underlying tty is
+    # full-duplex. The RX path reads PCM frame lines; the TX path writes
+    # binary TEXT_CHUNK / TEXT_END frames so src/link.c drives the
+    # RESPONDING label on the device display.
+    tx_serial = None
+    if line_source_factory is None:
+        try:
+            import serial as _serial
+            tx_serial = _serial.Serial(port, baudrate=args.uart_baud, timeout=1)
+        except Exception as e:
+            print(
+                f"[uart] warn: could not open {port} ({e}); "
+                "device-side reply display disabled",
+                file=sys.stderr,
+            )
+
+    async def uart_tx_outbound(raw: bytes):
+        if tx_serial is None:
+            return
+        try:
+            tx_serial.write(raw)
+            tx_serial.flush()
+        except Exception as e:
+            print(f"[uart] TX write failed: {e}", file=sys.stderr)
 
     pipeline = AssistantPipeline(
         config=cfg,
         opus=opus,
         transcriber=transcriber,
         llm=llm,
-        on_outbound=stdout_outbound,
+        on_outbound=uart_tx_outbound,
     )
 
     if line_source_factory is not None:
@@ -330,7 +349,12 @@ async def _run_uart(
         source_desc = "(injected)"
     else:
         assert port is not None
-        lines = _make_uart_line_source(port, args.uart_baud)
+        if tx_serial is not None:
+            # Reuse the TX serial for RX line decode (single-owner).
+            from audio_capture.uart_protocol import _serial_lines_from
+            lines = _serial_lines_from(tx_serial)
+        else:
+            lines = _make_uart_line_source(port, args.uart_baud)
         source_desc = f"{port} @ {args.uart_baud} baud"
 
     print(

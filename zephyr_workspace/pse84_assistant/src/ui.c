@@ -192,9 +192,21 @@ static void build_thinking_group(lv_obj_t *parent)
 #endif
 }
 
+/* Forward-declare — actual storage + mutator live below the procedural
+ * block, but typing_timer_cb needs to honor the "real reply active"
+ * suppression flag.
+ */
+static bool ui_reply_active;
+
 static void typing_timer_cb(lv_timer_t *t)
 {
 	ARG_UNUSED(t);
+	/* Suppress the placeholder typing animation whenever a real reply
+	 * is streaming. ui_append_reply_text() owns the label in that case.
+	 */
+	if (ui_reply_active) {
+		return;
+	}
 	const size_t total = strlen(TYPING_TEXT);
 
 	ui.typing_idx++;
@@ -232,6 +244,48 @@ static void build_responding_group(lv_obj_t *parent)
 	ui.typing_timer = lv_timer_create(typing_timer_cb, TYPING_TICK_MS, NULL);
 }
 #endif /* CONFIG_APP_ANIMATION_PROCEDURAL */
+
+/* ---- real reply accumulator (TEXT_CHUNK / TEXT_END from link.c) ---- */
+
+#define UI_REPLY_BUF_CAP 1024
+static char ui_reply_buf[UI_REPLY_BUF_CAP + 1];
+static int  ui_reply_len;
+/* ui_reply_active is forward-declared above typing_timer_cb. */
+
+void ui_append_reply_text(const char *utf8, int len)
+{
+	if (utf8 == NULL || len <= 0) {
+		return;
+	}
+	int copy = len;
+
+	if (copy > UI_REPLY_BUF_CAP - ui_reply_len) {
+		copy = UI_REPLY_BUF_CAP - ui_reply_len;
+	}
+	if (copy > 0) {
+		memcpy(ui_reply_buf + ui_reply_len, utf8, (size_t)copy);
+		ui_reply_len += copy;
+		ui_reply_buf[ui_reply_len] = '\0';
+	}
+	ui_reply_active = true;
+#ifdef CONFIG_APP_ANIMATION_PROCEDURAL
+	if (ui.responding_label != NULL) {
+		lv_label_set_text(ui.responding_label, ui_reply_buf);
+	}
+#endif
+}
+
+void ui_clear_reply_text(void)
+{
+	ui_reply_len = 0;
+	ui_reply_buf[0] = '\0';
+	ui_reply_active = false;
+#ifdef CONFIG_APP_ANIMATION_PROCEDURAL
+	if (ui.responding_label != NULL) {
+		lv_label_set_text(ui.responding_label, "_");
+	}
+#endif
+}
 
 /* ---- state switching ---- */
 

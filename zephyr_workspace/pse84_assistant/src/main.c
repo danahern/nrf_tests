@@ -27,6 +27,8 @@
 #include "audio.h"
 #endif
 
+#include "link.h"
+
 #ifdef CONFIG_LVGL
 #include <zephyr/device.h>
 #include <zephyr/drivers/display.h>
@@ -104,9 +106,14 @@ static void button_input_cb(struct input_event *evt, void *user_data)
 	 * Release edge: stop + dump the capture.
 	 */
 	if (evt->value == 1) {
-		const assist_state_t next = state_cycle();
-
-		LOG_INF("button press -> %s", state_name(next));
+		/* Press -> LISTENING: show the thinking-pose animation while
+		 * we capture, arm the 2 s auto-stop safety timer. The state
+		 * machine no longer auto-cycles through states — transitions
+		 * are driven by real events: press/release and incoming
+		 * TEXT_CHUNK/TEXT_END frames from the host bridge.
+		 */
+		state_set(ASSIST_LISTENING);
+		LOG_INF("button press -> LISTENING");
 #ifdef CONFIG_AUDIO_DMIC
 		if (audio_capture_start() == 0) {
 			k_timer_start(&audio_autostop_timer,
@@ -127,6 +134,14 @@ static void button_input_cb(struct input_event *evt, void *user_data)
 			k_work_submit(&audio_stop_work);
 		}
 #endif
+		/* Release -> THINKING: audio capture just ended, host is
+		 * about to transcribe + query the LLM. Stay here until the
+		 * first TEXT_CHUNK arrives (link.c kicks us to RESPONDING)
+		 * or the user presses again (back to LISTENING).
+		 */
+		if (state_get() == ASSIST_LISTENING) {
+			state_set(ASSIST_THINKING);
+		}
 	}
 }
 INPUT_CALLBACK_DEFINE(NULL, button_input_cb, NULL);
@@ -183,6 +198,10 @@ int main(void)
 		LOG_ERR("audio_init failed; PDM capture disabled");
 	}
 #endif
+
+	if (link_init() != 0) {
+		LOG_ERR("link_init failed; host text replies won't render");
+	}
 
 	/* First flush before unblanking to avoid a frame of garbage. */
 	ui_tick();
