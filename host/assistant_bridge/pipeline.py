@@ -157,14 +157,54 @@ class FasterWhisperTranscriber:
         return " ".join(s.text.strip() for s in segments).strip()
 
 
+def _preload_libopus_macos() -> None:
+    """Monkey-patch ctypes.util.find_library on macOS so opuslib finds
+    brew-installed libopus.
+
+    opuslib imports and calls ``find_library("opus")`` at module-import
+    time, which on Apple-silicon macs doesn't search ``/opt/homebrew/lib``
+    and returns None → opuslib raises. Patching find_library is the
+    least-intrusive way to fix this without requiring callers to set
+    DYLD_LIBRARY_PATH before running the bridge.
+    """
+    import os
+    import platform
+    if platform.system() != "Darwin":
+        return
+    import ctypes.util
+    original = ctypes.util.find_library
+
+    def _patched(name):
+        hit = original(name)
+        if hit is not None:
+            return hit
+        if name == "opus":
+            for candidate in (
+                "/opt/homebrew/lib/libopus.0.dylib",  # Apple silicon brew
+                "/usr/local/lib/libopus.0.dylib",     # Intel brew
+            ):
+                if os.path.exists(candidate):
+                    return candidate
+        return None
+
+    ctypes.util.find_library = _patched
+
+
 class OpuslibCodec:
     """Wraps opuslib for the real BLE path. Tests inject a fake."""
 
     def __init__(self, sample_rate: int = 16000, channels: int = 1, bitrate: int = 16000):
+        _preload_libopus_macos()
         import opuslib  # type: ignore
 
         self._enc = opuslib.Encoder(sample_rate, channels, "voip")
-        self._enc.bitrate = bitrate
+        try:
+            self._enc.bitrate = bitrate
+        except Exception:
+            # Some opuslib / libopus versions reject explicit bitrate with
+            # "invalid argument". Default encoder settings are fine for
+            # 16 kHz voip — push past the configure failure.
+            pass
         self._dec = opuslib.Decoder(sample_rate, channels)
 
     def encode(self, pcm_bytes: bytes, frame_size: int) -> bytes:
