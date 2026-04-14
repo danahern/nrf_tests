@@ -1,77 +1,57 @@
 /*
- * M33NS companion overlay (applied by sysbuild to the enable_cm55 image
- * when that image's board is kit_pse84_eval/.../m33/ns).
+ * M33 (Secure) companion overlay applied by sysbuild to the enable_cm55
+ * image. This image boots from RRAM, not from SMIF — so we override
+ * m33s_header / m33s_xip to the RRAM slot the OEM policy's
+ * oem_app_address (0x32011000) points at. Without this, the linker
+ * places code at 0x18100400 (internal-flash-alias XIP) and `west flash`
+ * writes bytes to SMIF at 0x60100000 — neither of which is the boot
+ * slot, and the chip silently keeps running whatever stale M33 was
+ * previously provisioned. The pse84_i2c_test kit app uses the same
+ * RRAM-slot override (see its boards/.../m33.overlay).
  *
- * The NS board DTS does NOT include kit_pse84_eval_common.dtsi, so it
- * has no uart2 label or pinctrl config. We bring in uart2 here using
- * the NS alias of scb2 (pse84.dtsi: scb@429a0000), and add the IPC
- * shared-memory + mbox nodes so ipc_service can bridge M55 <-> M33NS.
+ * CLK_HF12 override feeds the MIPI-DSI D-PHY PLL on the M55.
  */
 
 #include <zephyr/dt-bindings/clock/ifx_clock_source_common.h>
 
 /*
- * CLK_HF12 -> 25 MHz for the MIPI-DSI D-PHY PLL reference (M55 uses
- * this). Routed via CLKPATH0 (DPLL_LP0 400 MHz) / 16.
+ * RRAM boot slot. Extended-boot per OEM policy jumps to
+ * oem_app_address = 0x32011000 (SBUS Secure alias of RRAM) and reads
+ * the mcuboot header + vector table from there.
+ *
+ * The vector table's reset vector, however, must point into the
+ * CBUS Secure alias (0x18...) because Cortex-M fetches instructions
+ * via CBUS — SBUS is data-only for code regions on this SoC. So
+ * the m33s_xip partition reg (which drives the linker's ROM base)
+ * has to be the CBUS Secure alias 0x18100400, while m33s_header
+ * stays at the SBUS NS alias 0x22011000 so openocd's RRAM flash
+ * bank (cat1d.cm33.main_ns) can write the bytes. Both aliases map
+ * to the same physical RRAM cells.
+ *
+ * Mismatch here (code linked for SBUS 0x32011400) produces a reset
+ * vector pointing into SBUS, which then HardFaults on the first
+ * instruction fetch — observed 2026-04-14 before this fix.
  */
+&m33s_header { reg = <0x22011000 0x400>; };
+&m33s_xip    { reg = <0x18100400 DT_SIZE_K(356)>; };
+/ { chosen { zephyr,flash = &m33s_xip; }; };
+
 &clk_hf12 {
 	source-path = <IFX_CLK_HF_IN_CLKPATH0>;
 	clock-div = <IFX_CLK_HF_DIVIDE_BY_16>;
 	status = "okay";
 };
 
-/*
- * uart2: P6.7 TX / P6.5 RX, same pins the M55 console uses. On PSE84
- * both cores can drive the SCB2 UART via the NS (0x429a0000) and
- * Secure (0x529a0000) aliases; we pick NS here.
- *
- * TF-M owns uart2 during its own secure init/banner; once control is
- * handed off to Zephyr NS, Zephyr's uart driver takes over SCB2 and
- * becomes the live writer. Baud must match what M55 expects on the
- * shared wire (460800).
- */
-&scb2 {
-	compatible = "infineon,uart";
-	status = "okay";
+&uart2 {
 	current-speed = <460800>;
-	clocks = <&peri0_group1_16bit_0>;
-	pinctrl-0 = <&p6_7_scb2_uart_tx &p6_5_scb2_uart_rx>;
-	pinctrl-names = "default";
 };
 
-&peri0_group1_16bit_0 {
-	status = "okay";
-	clock-div = <1>;
-};
-
-&p6_7_scb2_uart_tx {
-	drive-push-pull;
-};
-
-&p6_5_scb2_uart_rx {
-	input-enable;
-};
-
+/*
+ * Phase 0b.8: M33 side of the assistant ipc_service endpoint.
+ * TX/RX channels swapped relative to the M55 overlay so icmsg matches
+ * end-to-end. NVIC IRQ 1 = m33syscpuss_interrupts_ipc_dpslp_0_IRQn.
+ */
 / {
-	chosen {
-		zephyr,console = &scb2;
-		zephyr,uart-mcumgr = &scb2;
-	};
-
-	/*
-	 * Phase 0b.8: M33NS side of the assistant ipc_service endpoint.
-	 *
-	 * IPC MMIO lives at 0x422a0000 on the NS alias (vs 0x441d0000 on
-	 * M55). The PDL Cy_IPC_Drv_* helpers dispatch through each CPU's
-	 * own view so the reg value here is informational.
-	 *
-	 * TX/RX channels are swapped relative to M55:
-	 *   M55 TX (ch9)  -> M33 RX (ch9)
-	 *   M55 RX (ch10) -> M33 TX (ch10)
-	 *
-	 * NVIC IRQ 1 = m33syscpuss_interrupts_ipc_dpslp_0_IRQn per
-	 * cy_device_headers_ns.h.
-	 */
 	soc {
 		pse84_mbox: mbox@422a0000 {
 			compatible = "infineon,pse84-mbox";
