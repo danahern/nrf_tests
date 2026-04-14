@@ -32,11 +32,14 @@ from uart_protocol import (
     BEGIN_RE,
     END_MARKER,
     HEX_RE,
+    OpusBlock,
     PcmFrame,
     find_serial_port,
     iter_captures,
     iter_captures_from_serial,
+    iter_captures_mixed,
     parse_frame,
+    parse_opus_block,
 )
 
 
@@ -64,6 +67,28 @@ def write_wav(frame: PcmFrame, path: Path) -> None:
         w.setsampwidth(frame.bits // 8)
         w.setframerate(frame.sample_rate)
         w.writeframes(frame.pcm)
+
+
+def decode_opus_block_to_wav(block: OpusBlock, path: Path) -> Optional[bytes]:
+    """Decode an Opus block via opuslib and write a WAV alongside. Returns
+    the decoded PCM bytes, or ``None`` if opuslib isn't installed.
+    """
+    try:
+        import opuslib  # type: ignore
+    except ImportError:
+        return None
+    dec = opuslib.Decoder(block.sample_rate, 1)
+    pcm_out = bytearray()
+    for pkt in block.packets:
+        decoded = dec.decode(pkt, block.frame_samples)
+        pcm_out.extend(decoded)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(block.sample_rate)
+        w.writeframes(bytes(pcm_out))
+    return bytes(pcm_out)
 
 
 def autoplay(path: Path) -> None:
@@ -115,18 +140,43 @@ def main(argv: Optional[list[str]] = None) -> int:
         print("ERROR: no /dev/cu.usbmodem* device found", file=sys.stderr)
         return 2
 
+    print(f"listening on {port} @ {args.baud} baud (Ctrl-C to stop)")
     try:
-        for frame in stream_frames_from_serial(port, args.baud):
-            ts = time.strftime("%Y%m%d_%H%M%S")
-            out = args.out_dir / f"{ts}.wav"
-            write_wav(frame, out)
-            peak = frame.peak()
-            print(
-                f"captured {frame.samples} samples "
-                f"({frame.duration_ms:.0f} ms), peak={peak}, wav={out}"
-            )
-            if not args.no_play:
-                autoplay(out)
+        last_pcm_ts: Optional[str] = None
+        for obj in iter_captures_mixed(
+            __import__("uart_protocol")._serial_lines(port, args.baud)
+        ):
+            if isinstance(obj, PcmFrame):
+                ts = time.strftime("%Y%m%d_%H%M%S")
+                last_pcm_ts = ts
+                out = args.out_dir / f"{ts}.wav"
+                write_wav(obj, out)
+                peak = obj.peak()
+                print(
+                    f"captured {obj.samples} samples "
+                    f"({obj.duration_ms:.0f} ms), peak={peak}, wav={out}"
+                )
+                if not args.no_play:
+                    autoplay(out)
+            elif isinstance(obj, OpusBlock):
+                ts = last_pcm_ts or time.strftime("%Y%m%d_%H%M%S")
+                out = args.out_dir / f"{ts}_opus.wav"
+                pcm = decode_opus_block_to_wav(obj, out)
+                if pcm is None:
+                    print(
+                        f"opus block: {obj.frames} frames, {obj.total_bytes} B "
+                        f"(opuslib not installed → skipping decode)"
+                    )
+                else:
+                    ratio = (
+                        obj.frames * obj.frame_samples * 2 /
+                        max(1, obj.total_bytes)
+                    )
+                    print(
+                        f"opus decoded {obj.frames} frames "
+                        f"({obj.total_bytes} B, ratio={ratio:.1f}x), "
+                        f"wav={out}"
+                    )
     except KeyboardInterrupt:
         print("\nstopped")
     return 0

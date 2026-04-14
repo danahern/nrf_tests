@@ -31,6 +31,84 @@ BEGIN_RE = re.compile(
 END_MARKER = "=== PCM_END ==="
 HEX_RE = re.compile(r"^[0-9a-fA-F]+$")
 
+OPUS_BEGIN_RE = re.compile(
+    r"=== OPUS_BEGIN frames=(?P<frames>\d+) frame_samples=(?P<fs>\d+) "
+    r"sample_rate=(?P<sr>\d+) bitrate=(?P<br>\d+) ==="
+)
+OPUS_END_MARKER = "=== OPUS_END ==="
+
+
+@dataclass
+class OpusBlock:
+    """A captured Opus stream: per-frame (u16-LE length + opus bytes)."""
+
+    frames: int
+    frame_samples: int
+    sample_rate: int
+    bitrate: int
+    packets: list[bytes]  # one entry per encoded frame, raw opus bytes
+
+    @property
+    def total_bytes(self) -> int:
+        return sum(len(p) for p in self.packets)
+
+
+def parse_opus_block(lines: Iterable[str]) -> Optional[OpusBlock]:
+    """Parse a single complete OPUS_BEGIN / ... / OPUS_END block."""
+    it = iter(lines)
+    header: Optional[re.Match[str]] = None
+    for line in it:
+        m = OPUS_BEGIN_RE.search(line)
+        if m:
+            header = m
+            break
+    if header is None:
+        return None
+
+    frames_count = int(header.group("frames"))
+    fs = int(header.group("fs"))
+    sr = int(header.group("sr"))
+    br = int(header.group("br"))
+
+    hex_chunks: list[str] = []
+    found_end = False
+    for line in it:
+        stripped = line.strip()
+        if stripped == OPUS_END_MARKER:
+            found_end = True
+            break
+        if HEX_RE.match(stripped):
+            hex_chunks.append(stripped)
+    if not found_end:
+        raise ValueError("OPUS_BEGIN seen but no matching OPUS_END")
+
+    raw = bytes.fromhex("".join(hex_chunks))
+    # The firmware interleaves (u16 LE length prefix, opus bytes) per frame.
+    packets: list[bytes] = []
+    off = 0
+    while off < len(raw):
+        if off + 2 > len(raw):
+            raise ValueError("truncated OPUS length prefix")
+        n = raw[off] | (raw[off + 1] << 8)
+        off += 2
+        if off + n > len(raw):
+            raise ValueError(
+                f"truncated OPUS payload (need {n}, have {len(raw) - off})"
+            )
+        packets.append(raw[off:off + n])
+        off += n
+    if len(packets) != frames_count:
+        raise ValueError(
+            f"expected {frames_count} Opus packets, decoded {len(packets)}"
+        )
+    return OpusBlock(
+        frames=frames_count,
+        frame_samples=fs,
+        sample_rate=sr,
+        bitrate=br,
+        packets=packets,
+    )
+
 
 @dataclass
 class PcmFrame:
@@ -125,6 +203,42 @@ def iter_captures(lines: Iterable[str]) -> Iterator[PcmFrame]:
             buf = []
             if frame is not None:
                 yield frame
+
+
+def iter_captures_mixed(lines: Iterable[str]) -> Iterator[object]:
+    """Yield PcmFrame or OpusBlock objects in stream order.
+
+    The Phase 3 firmware emits PCM_BEGIN/PCM_END first and then (when
+    CONFIG_APP_AUDIO_EMIT_OPUS is set) OPUS_BEGIN/OPUS_END. Callers that
+    want both use this instead of :func:`iter_captures`.
+    """
+    buf: list[str] = []
+    mode: Optional[str] = None  # "pcm" or "opus"
+    for line in lines:
+        stripped = line.strip()
+        if BEGIN_RE.search(line):
+            buf = [line]
+            mode = "pcm"
+            continue
+        if OPUS_BEGIN_RE.search(line):
+            buf = [line]
+            mode = "opus"
+            continue
+        if mode is None:
+            continue
+        buf.append(line)
+        if mode == "pcm" and stripped == END_MARKER:
+            frame = parse_frame(buf)
+            mode = None
+            buf = []
+            if frame is not None:
+                yield frame
+        elif mode == "opus" and stripped == OPUS_END_MARKER:
+            block = parse_opus_block(buf)
+            mode = None
+            buf = []
+            if block is not None:
+                yield block
 
 
 def _serial_lines(port: str, baud: int) -> Iterator[str]:

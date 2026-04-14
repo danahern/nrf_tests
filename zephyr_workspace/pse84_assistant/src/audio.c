@@ -37,6 +37,12 @@
 #include <string.h>
 #include <stdlib.h>
 
+#ifdef CONFIG_APP_AUDIO_EMIT_OPUS
+#include "opus_wrapper.h"
+#define OPUS_FRAME_SAMPLES 320  /* 20 ms @ 16 kHz */
+#define OPUS_MAX_BYTES     320  /* per-frame ceiling (libopus safe upper bound at 16 kbps) */
+#endif
+
 LOG_MODULE_REGISTER(audio, LOG_LEVEL_INF);
 
 /* DMA block count — match CONFIG_DMIC_INFINEON_QUEUE_SIZE (default 8).
@@ -362,6 +368,57 @@ int audio_capture_stop(void)
 	audio_hex_dump((const uint8_t *)audio_ring,
 		       audio_ring_samples * sizeof(int16_t));
 	printk("=== PCM_END ===\n");
+
+#ifdef CONFIG_APP_AUDIO_EMIT_OPUS
+	/* Phase 3: Opus-encode the same buffer into 20 ms frames and emit
+	 * alongside the PCM dump. Host-side receive_pcm.py picks up the
+	 * OPUS block opportunistically, decodes, and writes a second WAV.
+	 * Keeps the PCM_BEGIN/END payload intact so existing parsers keep
+	 * working. Encoder state is stack-allocated (large-ish; ~20 KB) —
+	 * only instantiated on capture-stop so the steady-state M55 RAM
+	 * doesn't carry it.
+	 */
+	opus_wrap_ctx_t *enc =
+		opus_wrap_init(AUDIO_SAMPLE_RATE_HZ, AUDIO_CHANNELS, 16000);
+	if (enc == NULL) {
+		LOG_WRN("OPUS encoder init failed, skipping OPUS dump");
+	} else {
+		const size_t full_frames = audio_ring_samples / OPUS_FRAME_SAMPLES;
+		size_t total_opus_bytes = 0;
+		printk("=== OPUS_BEGIN frames=%u frame_samples=%d sample_rate=%d "
+		       "bitrate=16000 ===\n",
+		       (unsigned)full_frames, OPUS_FRAME_SAMPLES,
+		       AUDIO_SAMPLE_RATE_HZ);
+		uint8_t enc_buf[OPUS_MAX_BYTES];
+		for (size_t f = 0; f < full_frames; f++) {
+			const int16_t *pcm = &audio_ring[f * OPUS_FRAME_SAMPLES];
+			int n = opus_wrap_encode_frame(enc, pcm, OPUS_FRAME_SAMPLES,
+						       enc_buf, sizeof(enc_buf));
+			if (n <= 0) {
+				LOG_WRN("OPUS encode frame %u failed: %d",
+					(unsigned)f, n);
+				continue;
+			}
+			/* u16 LE length prefix per frame, then the opus bytes,
+			 * line-wrapped identically to PCM hex (64 chars/line).
+			 */
+			uint8_t len_prefix[2] = { (uint8_t)(n & 0xff),
+						  (uint8_t)((n >> 8) & 0xff) };
+			audio_hex_dump(len_prefix, 2);
+			audio_hex_dump(enc_buf, (size_t)n);
+			total_opus_bytes += (size_t)n;
+		}
+		printk("=== OPUS_END ===\n");
+		const size_t raw_bytes = full_frames * OPUS_FRAME_SAMPLES *
+					 sizeof(int16_t);
+		LOG_INF("OPUS emit: frames=%u total_bytes=%u ratio=%u.%02ux",
+			(unsigned)full_frames, (unsigned)total_opus_bytes,
+			(unsigned)(raw_bytes / (total_opus_bytes + 1)),
+			(unsigned)((raw_bytes * 100 /
+				    (total_opus_bytes + 1)) % 100));
+		opus_wrap_free(enc);
+	}
+#endif /* CONFIG_APP_AUDIO_EMIT_OPUS */
 
 	return 0;
 }
