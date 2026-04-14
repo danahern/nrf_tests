@@ -238,3 +238,30 @@ dmic_dev: &dmic0 {
 &uart2 {
 	current-speed = <460800>;
 };
+
+/*
+ * Phase 0b.2: instantiate the PSE84 mailbox driver (drivers/mbox/mbox_pse84.c)
+ * for the M55 side of the Phase 0b IPC. Reuses CY_IPC_CHAN_USER + 1 for the
+ * M55 doorbell receive side (M33 writes, M55 reads). NVIC line 46 =
+ * m55appcpuss_interrupts_ipc_dpslp_0_IRQn per
+ * zephyrproject/modules/hal/infineon/mtb-template-pse8xxgp/files/devices/
+ * include/pse846gps2dbzc4a.h. Channel pair decision + intr-index mapping
+ * documented in dts/bindings/mbox/infineon,pse84-mbox.yaml.
+ *
+ * No runtime wiring yet — no ipc_service client consumes this mbox.
+ * Driver just init-probes at boot so we can see it come up cleanly
+ * before Phase 0b.3 lands the M33 app + Phase 0b.4 wires ipc_service.
+ */
+/ {
+	soc {
+		pse84_mbox: mbox@441d0000 {
+			compatible = "infineon,pse84-mbox";
+			reg = <0x441d0000 0x1000>;
+			interrupts = <46 3>;
+			channels-used = <9 10>;   /* CY_IPC_CHAN_USER + {0,1} */
+			intr-index = <0>;
+			#mbox-cells = <1>;
+			status = "okay";
+		};
+	};
+};
