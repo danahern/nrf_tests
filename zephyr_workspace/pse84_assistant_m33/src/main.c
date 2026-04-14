@@ -22,11 +22,22 @@ static void ep_recv(const void *data, size_t len, void *priv)
 {
 	ARG_UNUSED(priv);
 	/* M55 already formatted the line via log_output (level prefix +
-	 * timestamp + newline); just splat to uart2.
+	 * timestamp + newline); splat to uart2 with a "[m55] " tag
+	 * injected at every logical line start so the serial console can
+	 * tell which core emitted what.
 	 */
+	static bool at_line_start = true;
 	const char *p = data;
 	for (size_t i = 0; i < len; i++) {
-		printk("%c", p[i]);
+		char c = p[i];
+		if (at_line_start && c != '\n' && c != '\r') {
+			printk("[m55] ");
+			at_line_start = false;
+		}
+		printk("%c", c);
+		if (c == '\n') {
+			at_line_start = true;
+		}
 	}
 }
 
