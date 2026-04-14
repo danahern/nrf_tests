@@ -33,6 +33,7 @@
 #endif
 
 #include "link.h"
+#include "log_tunnel.h"
 
 #ifdef CONFIG_LVGL
 #include <zephyr/device.h>
@@ -242,6 +243,7 @@ int main(void)
 		} else {
 			LOG_INF("ipc_service: 'assistant' endpoint registered "
 				"(peer: M33 — awaiting handshake)");
+			log_tunnel_attach_endpoint(&ipc_ep);
 		}
 	}
 #endif

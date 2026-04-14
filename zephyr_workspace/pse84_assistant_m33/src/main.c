@@ -1,32 +1,70 @@
 /*
  * PSE84 Voice Assistant — M33 companion.
  *
- * Replaces samples/basic/minimal in the kit_pse84_eval sysbuild
- * companion slot. ifx_pse84_cm55_startup() has already run via the
- * SoC's soc_late_init_hook by the time main() is entered; so this
- * thread is what keeps M33 alive and will eventually host:
- *   - Zephyr Bluetooth (HCI UART to onboard CYW55513)        [Phase 4]
- *   - ipc_service peer for the M55 endpoint registered in    [Phase 0b.7+]
- *     src/main.c on the M55 side ('assistant' endpoint on
- *     assistant_ipc0).
+ * Phase 0b.8: M33 owns uart2 and acts as the log printer for both
+ * cores. M55 disables CONFIG_LOG_BACKEND_UART and routes its
+ * LOG_INF/WRN/ERR lines via the 'assistant' ipc_service endpoint
+ * (icmsg over infineon,pse84-mbox). Here on M33 we register the peer
+ * endpoint and printk every received byte straight to uart2.
  *
- * For Phase 0b.7 the loop is just a heartbeat log — proof that the
- * new companion image boots in place of samples/basic/minimal.
+ * Phase 4 will add Bluetooth (HCI UART -> CYW55513) on top of this
+ * skeleton; the same ipc endpoint will gain a framed-data path then.
  */
 #include <zephyr/kernel.h>
+#include <zephyr/device.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/ipc/ipc_service.h>
+#include <zephyr/sys/printk.h>
 
 LOG_MODULE_REGISTER(pse84_assistant_m33, LOG_LEVEL_INF);
 
+static void ep_recv(const void *data, size_t len, void *priv)
+{
+	ARG_UNUSED(priv);
+	/* M55 already formatted the line via log_output (level prefix +
+	 * timestamp + newline); just splat to uart2.
+	 */
+	const char *p = data;
+	for (size_t i = 0; i < len; i++) {
+		printk("%c", p[i]);
+	}
+}
+
+static void ep_bound(void *priv)
+{
+	ARG_UNUSED(priv);
+	printk("[m33] ipc 'assistant' endpoint bound — log tunnel live\n");
+}
+
 int main(void)
 {
-	LOG_INF("=== PSE84 M33 companion (Phase 0b.7 skeleton) ===");
+	printk("=== PSE84 M33 companion (Phase 0b.8 log sink) ===\n");
+
+	const struct device *ipc_dev =
+		DEVICE_DT_GET(DT_NODELABEL(assistant_ipc0));
+	static struct ipc_ept ep;
+	static const struct ipc_ept_cfg cfg = {
+		.name = "assistant",
+		.cb = {
+			.bound = ep_bound,
+			.received = ep_recv,
+		},
+	};
+
+	if (!device_is_ready(ipc_dev)) {
+		printk("[m33] assistant_ipc0 not ready\n");
+	} else if (ipc_service_open_instance(ipc_dev) < 0) {
+		printk("[m33] ipc_service_open_instance failed\n");
+	} else if (ipc_service_register_endpoint(ipc_dev, &ep, &cfg) < 0) {
+		printk("[m33] ipc_service_register_endpoint failed\n");
+	} else {
+		printk("[m33] ipc 'assistant' endpoint registered\n");
+	}
 
 	uint32_t tick = 0;
-
 	while (1) {
 		k_sleep(K_SECONDS(5));
-		LOG_INF("m33 heartbeat tick=%u", ++tick);
+		printk("[m33] heartbeat tick=%u\n", ++tick);
 	}
 	return 0;
 }
