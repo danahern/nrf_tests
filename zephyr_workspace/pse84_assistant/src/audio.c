@@ -132,45 +132,94 @@ static void audio_thread_fn(void *a, void *b, void *c)
 	ARG_UNUSED(b);
 	ARG_UNUSED(c);
 
+	/* DMIC runs continuously after audio_init() — see the comment on
+	 * audio_capture_start(). This thread pulls every block out of the
+	 * driver forever, and only COPIES to audio_ring when a capture is
+	 * active. That keeps the PDM DC-blocker warm between captures,
+	 * eliminating the ~800 ms settling transient that otherwise dominated
+	 * each 2 s capture window (peak=27842 first-sample artifact).
+	 */
+	uint32_t total_blocks = 0;
+	uint32_t copied_blocks = 0;
+	uint32_t err_timeout = 0;
+	uint32_t err_other = 0;
+	int64_t last_log_ms = 0;
+
 	while (1) {
-		/* Wait until a capture is armed. */
-		k_sem_take(&audio_capture_sem, K_FOREVER);
+		void *buffer;
+		uint32_t size;
+		int ret = dmic_read(dmic_dev, 0, &buffer, &size,
+				    AUDIO_BLOCK_DURATION_MS + 50);
 
-		while (audio_capturing) {
-			void *buffer;
-			uint32_t size;
-			/* Short timeout so we notice audio_capturing flipping
-			 * to false within one block's worth of wall-clock.
-			 */
-			int ret = dmic_read(dmic_dev, 0, &buffer, &size,
-					    AUDIO_BLOCK_DURATION_MS + 50);
-
-			if (ret < 0) {
-				if (ret == -EAGAIN || ret == -ETIMEDOUT) {
-					continue;
-				}
-				LOG_ERR("dmic_read failed: %d", ret);
-				break;
+		if (ret < 0) {
+			if (ret == -EAGAIN || ret == -ETIMEDOUT) {
+				err_timeout++;
+				continue;
 			}
+			LOG_ERR("dmic_read failed: %d", ret);
+			err_other++;
+			k_sleep(K_MSEC(50));
+			continue;
+		}
 
-			/* Append up to the cap. Beyond the cap we drop the
-			 * tail (button is supposed to have been released
-			 * already via the 2 s timeout in main.c).
+		total_blocks++;
+
+		if (audio_capturing) {
+			/* Skip the first 2 samples of each block — DMA/driver
+			 * writes them at init (s[0]=-26184, s[1]=9747 on this
+			 * kit) and never overwrites them. They pollute peak
+			 * calculation and corrupt the first 4 bytes of every
+			 * 100 ms window's worth of real audio. See heartbeat
+			 * trace (audio hb log lines) which shows s[0]/s[1]
+			 * frozen across all blocks while s[800] and s[n-1]
+			 * carry real mic data.
 			 */
+			const size_t skip_bytes = 2 * sizeof(int16_t);
+			const uint8_t *src =
+				(const uint8_t *)buffer + skip_bytes;
+			const size_t src_bytes =
+				(size > skip_bytes) ? (size - skip_bytes) : 0;
 			const size_t remaining_bytes =
 				(size_t)AUDIO_RING_BYTES -
 				(audio_ring_samples * sizeof(int16_t));
 			const size_t copy_bytes =
-				MIN((size_t)size, remaining_bytes);
+				MIN(src_bytes, remaining_bytes);
 
 			if (copy_bytes > 0) {
 				memcpy((uint8_t *)audio_ring +
 					       audio_ring_samples * sizeof(int16_t),
-				       buffer, copy_bytes);
+				       src, copy_bytes);
 				audio_ring_samples += copy_bytes / sizeof(int16_t);
+				copied_blocks++;
 			}
+		}
 
-			k_mem_slab_free(&audio_mem_slab, buffer);
+		k_mem_slab_free(&audio_mem_slab, buffer);
+
+		/* Heartbeat once a second so we can see the thread is alive
+		 * and measure read rate vs copy rate. Also peek at the first
+		 * sample of the just-received buffer to confirm fresh data.
+		 */
+		int64_t now = k_uptime_get();
+
+		if (now - last_log_ms >= 1000) {
+			const int16_t *s = (const int16_t *)buffer;
+			const size_t n = size / sizeof(int16_t);
+			int32_t peak = 0;
+
+			for (size_t k = 0; k < n; k++) {
+				int32_t a = s[k] < 0 ? -s[k] : s[k];
+
+				if (a > peak) peak = a;
+			}
+			LOG_INF("audio hb: blks=%u cop=%u to=%u o=%u | "
+				"buf=%p sz=%u s[0]=%d s[1]=%d s[800]=%d s[-1]=%d pk=%ld cap=%d",
+				(unsigned)total_blocks, (unsigned)copied_blocks,
+				(unsigned)err_timeout, (unsigned)err_other,
+				buffer, (unsigned)size, (int)s[0], (int)s[1],
+				(int)s[800], (int)s[n - 1], (long)peak,
+				(int)audio_capturing);
+			last_log_ms = now;
 		}
 	}
 }
@@ -199,8 +248,23 @@ int audio_init(void)
 					  AUDIO_THREAD_PRIORITY, 0, K_NO_WAIT);
 	k_thread_name_set(audio_thread_id, "audio");
 
+	/* Start DMIC once and leave it running. The thread above drains
+	 * every block forever; audio_capture_start/stop just gate which
+	 * blocks are copied into the ring. This keeps the PDM DC-blocker
+	 * warm so captures start from a settled baseline instead of the
+	 * big initial filter-state transient. See
+	 * zephyr_workspace/pse84_dmic_test for the diagnostic that proved
+	 * the settling takes ~800 ms of silence per START.
+	 */
+	ret = dmic_trigger(dmic_dev, DMIC_TRIGGER_START);
+	if (ret < 0) {
+		LOG_ERR("DMIC_TRIGGER_START (warm-up) failed: %d", ret);
+		return ret;
+	}
+
 	audio_configured = true;
-	LOG_INF("audio_init ok (dmic=%s, %d Hz mono s16, ring=%d bytes)",
+	LOG_INF("audio_init ok (dmic=%s, %d Hz mono s16, ring=%d bytes) — "
+		"DC blocker warming up, give ~1 s before first capture",
 		dmic_dev->name, AUDIO_SAMPLE_RATE_HZ, (int)AUDIO_RING_BYTES);
 	return 0;
 }
@@ -214,19 +278,15 @@ int audio_capture_start(void)
 		return 0;
 	}
 
+	/* DMIC is already running; just open the ring for writes. Zero the
+	 * ring so short presses that don't fill min_samples worth of audio
+	 * don't leak stale data from a previous capture through the padding.
+	 */
+	memset(audio_ring, 0, sizeof(audio_ring));
 	audio_ring_samples = 0;
 	audio_capture_start_ms = k_uptime_get();
-
-	int ret = dmic_trigger(dmic_dev, DMIC_TRIGGER_START);
-
-	if (ret < 0) {
-		LOG_ERR("DMIC_TRIGGER_START failed: %d", ret);
-		return ret;
-	}
-
 	audio_capturing = true;
-	k_sem_give(&audio_capture_sem);
-	LOG_INF("audio capture START");
+	LOG_INF("audio capture START (ring armed)");
 	return 0;
 }
 
@@ -302,6 +362,19 @@ static void audio_hex_dump(const uint8_t *buf, size_t len)
 		 */
 		printk("%s", line);
 		i += chunk;
+		/* Workqueue is cooperative (prio -1), audio_thread is
+		 * preemptible (prio 5). k_yield would only rotate among
+		 * cooperative threads and still starve the preemptible
+		 * audio_thread, so we need an actual time-slice via
+		 * k_msleep. Every 8 lines so the added latency is bounded
+		 * (~100 ms per 2 s dump) while still giving the DMA queue
+		 * enough chances to drain (queue depth is 8 blocks × 100 ms
+		 * each, so one slice every 8 printk lines keeps us well
+		 * under the depth).
+		 */
+		if ((i & 0x7) == 0) {
+			k_msleep(1);
+		}
 	}
 }
 
@@ -314,21 +387,15 @@ int audio_capture_stop(void)
 		return 0;
 	}
 
-	/* Flip the flag first so the capture thread exits its inner loop
-	 * as soon as its next dmic_read() returns.
+	/* Flip the flag — the thread will stop copying new blocks into the
+	 * ring on its next read. DMIC stays running to keep the DC blocker
+	 * warm for the next capture.
 	 */
 	audio_capturing = false;
 	audio_capture_stop_ms = k_uptime_get();
 
-	int ret = dmic_trigger(dmic_dev, DMIC_TRIGGER_STOP);
-
-	if (ret < 0) {
-		LOG_ERR("DMIC_TRIGGER_STOP failed: %d", ret);
-		/* Keep going — we still want whatever we captured. */
-	}
-
 	/* Give the thread one block's worth of time to drain its pending
-	 * dmic_read() + append.
+	 * dmic_read() so we don't race on audio_ring_samples.
 	 */
 	k_sleep(K_MSEC(AUDIO_BLOCK_DURATION_MS + 20));
 

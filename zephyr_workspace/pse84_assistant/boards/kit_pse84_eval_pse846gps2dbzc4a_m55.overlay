@@ -189,7 +189,25 @@ dmic_dev: &dmic0 {
 	 * onboard MEMS mic.
 	 */
 	fir0-enable;
-	fir1-scale = <9>;
+	fir1-scale = <0>;  /* max gain: no right-shift at all */
+};
+
+/*
+ * Add 50 ms software debounce to sw0 — the kit's default gpio-keys
+ * parent node in kit_pse84_eval_common.dtsi has no
+ * `debounce-interval-ms`, so every physical press RELEASE generates a
+ * burst of release/press edges. First press works because the initial
+ * contact (press) is typically clean; when the user finally releases
+ * after a 2 s hold, bounce fires multiple release→press→release cycles
+ * rapidly. Each bounce-press starts a NEW 2 s capture which is then
+ * ended by the next bounce-release, producing the 4-5 spurious ~100 ms
+ * captures the user observed. debounce-interval-ms is a property of
+ * the gpio_keys *parent* compatible, not individual children.
+ */
+/ {
+	gpio_keys {
+		debounce-interval-ms = <50>;
+	};
 };
 
 /*

@@ -114,6 +114,14 @@ static void button_input_cb(struct input_event *evt, void *user_data)
 		}
 #endif
 	} else if (evt->value == 0) {
+		LOG_INF("button release (capturing=%d)",
+			(int)
+#ifdef CONFIG_AUDIO_DMIC
+			audio_is_capturing()
+#else
+			0
+#endif
+			);
 #ifdef CONFIG_AUDIO_DMIC
 		if (audio_is_capturing()) {
 			k_work_submit(&audio_stop_work);

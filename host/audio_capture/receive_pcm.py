@@ -143,8 +143,19 @@ def main(argv: Optional[list[str]] = None) -> int:
     print(f"listening on {port} @ {args.baud} baud (Ctrl-C to stop)")
     try:
         last_pcm_ts: Optional[str] = None
+        import re as _re
+        _ANSI = _re.compile(r"\x1b\[[0-9;]*[A-Za-z]|\[8D|\[J|\[1;32m|\[m|\[0m")
+
+        def _log(line: str) -> None:
+            # Strip ANSI/cursor control, drop empty shell prompts.
+            clean = _ANSI.sub("", line).strip()
+            if not clean or clean == "uart:~$":
+                return
+            print(f"  | {clean}")
+
         for obj in iter_captures_mixed(
-            __import__("uart_protocol")._serial_lines(port, args.baud)
+            __import__("uart_protocol")._serial_lines(port, args.baud),
+            log_passthrough=_log,
         ):
             if isinstance(obj, PcmFrame):
                 ts = time.strftime("%Y%m%d_%H%M%S")

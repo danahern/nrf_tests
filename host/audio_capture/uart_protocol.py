@@ -205,12 +205,18 @@ def iter_captures(lines: Iterable[str]) -> Iterator[PcmFrame]:
                 yield frame
 
 
-def iter_captures_mixed(lines: Iterable[str]) -> Iterator[object]:
+def iter_captures_mixed(lines: Iterable[str],
+                        log_passthrough=None) -> Iterator[object]:
     """Yield PcmFrame or OpusBlock objects in stream order.
 
     The Phase 3 firmware emits PCM_BEGIN/PCM_END first and then (when
     CONFIG_APP_AUDIO_EMIT_OPUS is set) OPUS_BEGIN/OPUS_END. Callers that
     want both use this instead of :func:`iter_captures`.
+
+    ``log_passthrough`` is an optional callable(str) invoked on every
+    non-payload, non-marker line — used by ``receive_pcm.py`` to surface
+    Zephyr LOG_INF lines (``button press``, ``capture START/STOP``,
+    heartbeat, etc.) which would otherwise be silently swallowed.
     """
     buf: list[str] = []
     mode: Optional[str] = None  # "pcm" or "opus"
@@ -225,6 +231,11 @@ def iter_captures_mixed(lines: Iterable[str]) -> Iterator[object]:
             mode = "opus"
             continue
         if mode is None:
+            # Neither payload nor framing — hand to log passthrough so
+            # the firmware's diagnostic log lines reach stdout.
+            if log_passthrough is not None and stripped:
+                if not HEX_RE.match(stripped):
+                    log_passthrough(stripped)
             continue
         buf.append(line)
         if mode == "pcm" and stripped == END_MARKER:
