@@ -33,7 +33,12 @@ LOG_MODULE_REGISTER(pse84_assistant_m33, LOG_LEVEL_INF);
 #define CM55_BOOT_WAIT_TIME_USEC 100U
 static void release_cm55(void)
 {
+	/* Our m55_xip partition is at 0x60500000 (SMIF0 NS S-AHB alias).
+	 * CM55 boots in Secure state. Use Secure-alias 0x70500000 for
+	 * CM55_S_VECTOR_TABLE_BASE so the initial MSP/PC fetches go
+	 * through Secure bus. Same physical SMIF0 memory. */
 	const uintptr_t m55_vectors = DT_REG_ADDR(DT_NODELABEL(m55_xip));
+	const uintptr_t m55_vectors_s = m55_vectors | 0x10000000UL;
 	printk("[m33] bringing up CM55: PD1 + peri groups\n");
 
 	Cy_System_EnablePD1();
@@ -51,19 +56,41 @@ static void release_cm55(void)
 				     CY_MMIO_SMIF01_CLK_HF_NR);
 	Cy_SysEnableSOCMEM(true);
 
-	printk("[m33] releasing CM55 to vectors 0x%08lx\n",
-	       (unsigned long)m55_vectors);
-	Cy_SysEnableCM55(MXCM55, m55_vectors, CM55_BOOT_WAIT_TIME_USEC);
-
-	/* Belt-and-braces: Cy_SysEnableCM55 should have cleared CPU_WAIT
-	 * but if the APPCPU PPU power-on failed silently inside the PDL
-	 * the CM55_CTL write may not have taken. Direct clear here; it's
-	 * a no-op if already cleared. MXCM55_CM55_CTL_CPU_WAIT bit 24. */
-	MXCM55->CM55_CTL &= ~(1UL << 24);
-
-	printk("[m33] CM55 released, CM55_CTL=0x%08lx STATUS=0x%08lx\n",
+	printk("[m33] pre-release CM55: CTL=0x%08lx STATUS=0x%08lx CMD=0x%08lx S_VEC=0x%08lx NS_VEC=0x%08lx\n",
 	       (unsigned long)MXCM55->CM55_CTL,
-	       (unsigned long)MXCM55->CM55_STATUS);
+	       (unsigned long)MXCM55->CM55_STATUS,
+	       (unsigned long)MXCM55->CM55_CMD,
+	       (unsigned long)MXCM55->CM55_S_VECTOR_TABLE_BASE,
+	       (unsigned long)MXCM55->CM55_NS_VECTOR_TABLE_BASE);
+
+	/* S_VEC uses Secure alias (0x70500000), NS_VEC uses NS alias
+	 * (0x60500000). Same physical SMIF0 NOR flash. */
+	MXCM55->CM55_S_VECTOR_TABLE_BASE = m55_vectors_s;
+	MXCM55->CM55_NS_VECTOR_TABLE_BASE = m55_vectors;
+
+	printk("[m33] vectors set, calling Cy_SysEnableCM55 (waitus=100000)\n");
+	Cy_SysEnableCM55(MXCM55, m55_vectors, 100000U);
+
+	printk("[m33] post-PDL: CTL=0x%08lx STATUS=0x%08lx CMD=0x%08lx\n",
+	       (unsigned long)MXCM55->CM55_CTL,
+	       (unsigned long)MXCM55->CM55_STATUS,
+	       (unsigned long)MXCM55->CM55_CMD);
+
+	/* Direct register-level release as a last resort:
+	 *   CM55_CMD = VECTKEYSTAT | RESET=1  (HW self-clears → triggers reset)
+	 *   wait
+	 *   CM55_CTL &= ~CPU_WAIT */
+	MXCM55->CM55_CMD = (0x0000FA05UL << 16) | 0x1UL;
+	k_busy_wait(1000);
+	MXCM55->CM55_CTL = 0;
+
+	k_sleep(K_MSEC(200));
+
+	printk("[m33] final: CTL=0x%08lx STATUS=0x%08lx CMD=0x%08lx S_VEC=0x%08lx\n",
+	       (unsigned long)MXCM55->CM55_CTL,
+	       (unsigned long)MXCM55->CM55_STATUS,
+	       (unsigned long)MXCM55->CM55_CMD,
+	       (unsigned long)MXCM55->CM55_S_VECTOR_TABLE_BASE);
 }
 
 static void ep_recv(const void *data, size_t len, void *priv)
