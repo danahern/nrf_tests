@@ -22,6 +22,12 @@
 #include "cy_syspm_pdcm.h"
 #include "cy_mpc.h"
 
+/* Forward declarations from soc/infineon/edge/pse84/security_config/
+ * pse84_s_protection.h — the header itself lives under a Secure-only
+ * include path that may not be exposed to our app include dirs. */
+extern cy_rslt_t cy_ppc0_init(void);
+extern cy_rslt_t cy_ppc1_init(void);
+
 LOG_MODULE_REGISTER(pse84_assistant_m33, LOG_LEVEL_INF);
 
 /* MPC configuration for M55 + shared regions only. Mirrors m55_mpc_cfg/
@@ -198,6 +204,12 @@ static void release_cm55(void)
 	MXCM55->CM55_CTL = 0;
 
 	k_sleep(K_MSEC(200));
+
+	/* PPC attribution skipped — cy_ppc{0,1}_init iterates all peripheral
+	 * regions setting NS/nonpriv, which faults on the same APPCPUSS-gated
+	 * rows cy_mpc_init does. Need the Infineon ifx_pse84_cm55_startup
+	 * sequence to dodge these, which is what CONFIG_SOC_PSE84_M55_ENABLE=y
+	 * enables. See docs/pse84_m33_rram_investigation.md. */
 
 	printk("[m33] final: CTL=0x%08lx STATUS=0x%08lx CMD=0x%08lx S_VEC=0x%08lx\n",
 	       (unsigned long)MXCM55->CM55_CTL,
