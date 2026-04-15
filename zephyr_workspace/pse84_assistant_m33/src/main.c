@@ -20,8 +20,87 @@
 #include "cy_sysclk.h"
 #include "cy_syspm.h"
 #include "cy_syspm_pdcm.h"
+#include "cy_mpc.h"
 
 LOG_MODULE_REGISTER(pse84_assistant_m33, LOG_LEVEL_INF);
+
+/* MPC configuration for M55 + shared regions only. Mirrors m55_mpc_cfg/
+ * m55_mpc_regions + m33_m55_mpc_cfg/m33_m55_mpc_regions from
+ * soc/infineon/edge/pse84/security_config/pse84_s_protection.c, without
+ * touching m33s/m33nsc which extended-boot has already attributed and
+ * would fault on re-configure. Needed so CM55 has MPC clearance to
+ * instruction-fetch its XIP image from SMIF0 and data-access SOCMEM. */
+/* Wide-open MPC: every protection context (0-7), Secure AND NS, RW.
+ * Purpose is to rule out MPC as the blocker for CM55 boot. If CM55
+ * still doesn't start after this, the problem is not MPC — narrow
+ * the policy down later once everything works. */
+static const cy_stc_mpc_rot_cfg_t m55_cfg[] = {
+	{ .pc = CY_MPC_PC_0, .secure = CY_MPC_NON_SECURE, .access = CY_MPC_ACCESS_RW },
+	{ .pc = CY_MPC_PC_1, .secure = CY_MPC_NON_SECURE, .access = CY_MPC_ACCESS_RW },
+	{ .pc = CY_MPC_PC_2, .secure = CY_MPC_NON_SECURE, .access = CY_MPC_ACCESS_RW },
+	{ .pc = CY_MPC_PC_3, .secure = CY_MPC_NON_SECURE, .access = CY_MPC_ACCESS_RW },
+	{ .pc = CY_MPC_PC_4, .secure = CY_MPC_NON_SECURE, .access = CY_MPC_ACCESS_RW },
+	{ .pc = CY_MPC_PC_5, .secure = CY_MPC_NON_SECURE, .access = CY_MPC_ACCESS_RW },
+	{ .pc = CY_MPC_PC_6, .secure = CY_MPC_NON_SECURE, .access = CY_MPC_ACCESS_RW },
+	{ .pc = CY_MPC_PC_7, .secure = CY_MPC_NON_SECURE, .access = CY_MPC_ACCESS_RW },
+	{ .pc = CY_MPC_PC_0, .secure = CY_MPC_SECURE,     .access = CY_MPC_ACCESS_RW },
+	{ .pc = CY_MPC_PC_1, .secure = CY_MPC_SECURE,     .access = CY_MPC_ACCESS_RW },
+	{ .pc = CY_MPC_PC_2, .secure = CY_MPC_SECURE,     .access = CY_MPC_ACCESS_RW },
+	{ .pc = CY_MPC_PC_3, .secure = CY_MPC_SECURE,     .access = CY_MPC_ACCESS_RW },
+	{ .pc = CY_MPC_PC_4, .secure = CY_MPC_SECURE,     .access = CY_MPC_ACCESS_RW },
+	{ .pc = CY_MPC_PC_5, .secure = CY_MPC_SECURE,     .access = CY_MPC_ACCESS_RW },
+	{ .pc = CY_MPC_PC_6, .secure = CY_MPC_SECURE,     .access = CY_MPC_ACCESS_RW },
+	{ .pc = CY_MPC_PC_7, .secure = CY_MPC_SECURE,     .access = CY_MPC_ACCESS_RW },
+};
+/* m33_m55 wide-open like m55_cfg — CM55 boots Secure so it needs
+ * Secure access to SOCMEM for stack/BSS before any SAU handoff. */
+static const cy_stc_mpc_rot_cfg_t m33_m55_cfg[] = {
+	{ .pc = CY_MPC_PC_0, .secure = CY_MPC_NON_SECURE, .access = CY_MPC_ACCESS_RW },
+	{ .pc = CY_MPC_PC_1, .secure = CY_MPC_NON_SECURE, .access = CY_MPC_ACCESS_RW },
+	{ .pc = CY_MPC_PC_2, .secure = CY_MPC_NON_SECURE, .access = CY_MPC_ACCESS_RW },
+	{ .pc = CY_MPC_PC_3, .secure = CY_MPC_NON_SECURE, .access = CY_MPC_ACCESS_RW },
+	{ .pc = CY_MPC_PC_4, .secure = CY_MPC_NON_SECURE, .access = CY_MPC_ACCESS_RW },
+	{ .pc = CY_MPC_PC_5, .secure = CY_MPC_NON_SECURE, .access = CY_MPC_ACCESS_RW },
+	{ .pc = CY_MPC_PC_6, .secure = CY_MPC_NON_SECURE, .access = CY_MPC_ACCESS_RW },
+	{ .pc = CY_MPC_PC_7, .secure = CY_MPC_NON_SECURE, .access = CY_MPC_ACCESS_RW },
+	{ .pc = CY_MPC_PC_0, .secure = CY_MPC_SECURE,     .access = CY_MPC_ACCESS_RW },
+	{ .pc = CY_MPC_PC_1, .secure = CY_MPC_SECURE,     .access = CY_MPC_ACCESS_RW },
+	{ .pc = CY_MPC_PC_2, .secure = CY_MPC_SECURE,     .access = CY_MPC_ACCESS_RW },
+	{ .pc = CY_MPC_PC_3, .secure = CY_MPC_SECURE,     .access = CY_MPC_ACCESS_RW },
+	{ .pc = CY_MPC_PC_4, .secure = CY_MPC_SECURE,     .access = CY_MPC_ACCESS_RW },
+	{ .pc = CY_MPC_PC_5, .secure = CY_MPC_SECURE,     .access = CY_MPC_ACCESS_RW },
+	{ .pc = CY_MPC_PC_6, .secure = CY_MPC_SECURE,     .access = CY_MPC_ACCESS_RW },
+	{ .pc = CY_MPC_PC_7, .secure = CY_MPC_SECURE,     .access = CY_MPC_ACCESS_RW },
+};
+struct mpc_region { MPC_Type *base; uint32_t offset; uint32_t size; };
+/* SMIF0 M55 aperture — 58 MB with OCTAL, capped to stay under the
+ * 64 MB CY_XIP_PORT0_SIZE boundary bug (pse84_s_protection.c note). */
+static const struct mpc_region m55_regions[] = {
+	{ (MPC_Type *)SMIF0_CACHE_BLOCK_CACHEBLK_AHB_MPC0, 0x00500000, 0x03A00000 },
+	{ (MPC_Type *)SMIF0_CORE_AXI_MPC0,                  0x00500000, 0x03A00000 },
+	{ (MPC_Type *)SOCMEM_SRAM_MPC0,                     0x00000000, 0x00040000 },
+};
+/* Shared M33/M55 SOCMEM only — RRAMC and RAMC MPC blocks fault when
+ * M33 tries to re-configure them after extended-boot has attributed
+ * them (observed fault at Cy_Mpc_ConfigRotMpcStruct accessing 0x52211000
+ * RRAMC MPC register). SOCMEM is the critical one for IPC shared mem
+ * and framebuffers. Leave RAMC alone — CM55 doesn't use our RAMC1. */
+static const struct mpc_region m33_m55_regions[] = {
+	{ (MPC_Type *)SOCMEM_SRAM_MPC0, 0x00040000, 0x004C0000 },
+};
+
+static void apply_mpc(const cy_stc_mpc_rot_cfg_t *cfg, size_t cfg_n,
+		      const struct mpc_region *regions, size_t regions_n)
+{
+	for (size_t r = 0; r < regions_n; r++) {
+		for (size_t c = 0; c < cfg_n; c++) {
+			(void)Cy_Mpc_ConfigRotMpcStruct(regions[r].base,
+							regions[r].offset,
+							regions[r].size,
+							&cfg[c]);
+		}
+	}
+}
 
 /* Release CM55 from CPU_WAIT. policy_oem_octal makes extended-boot
  * launch the M33 image but does NOT self-release CM55 (confirmed by
@@ -57,6 +136,15 @@ static void release_cm55(void)
 				     CY_MMIO_SMIF01_CLK_HF_NR);
 	Cy_SysEnableSOCMEM(true);
 
+	/* Apply MPC attribution for M55 XIP (SMIF0 0x60500000+) and shared
+	 * regions. Without these CM55 takes an MPC fault on first fetch —
+	 * extended-boot's default MPC only exposes M33-facing regions. */
+	printk("[m33] configuring MPC for CM55 (SMIF0 + SOCMEM)\n");
+	apply_mpc(m55_cfg, ARRAY_SIZE(m55_cfg),
+		  m55_regions, ARRAY_SIZE(m55_regions));
+	apply_mpc(m33_m55_cfg, ARRAY_SIZE(m33_m55_cfg),
+		  m33_m55_regions, ARRAY_SIZE(m33_m55_regions));
+
 	printk("[m33] pre-release CM55: CTL=0x%08lx STATUS=0x%08lx CMD=0x%08lx S_VEC=0x%08lx NS_VEC=0x%08lx\n",
 	       (unsigned long)MXCM55->CM55_CTL,
 	       (unsigned long)MXCM55->CM55_STATUS,
@@ -73,7 +161,12 @@ static void release_cm55(void)
 	 * S_VEC uses Secure SBUS alias 0x70500000, NS_VEC uses NS SBUS
 	 * 0x60500000 — same physical SMIF0 NOR flash.
 	 */
-	MXCM55->CM55_S_VECTOR_TABLE_BASE = m55_vectors_s;
+	/* Write the NS alias to BOTH vector tables. The old sysbuild +
+	 * alt_boot path that "just worked" had CM55 launched from the
+	 * SMIF0 NS SBUS alias (0x60500000) by extended-boot, so both
+	 * Secure and NS fetches landed in the same memory. Duplicate that
+	 * here to avoid Secure-vs-NS alias mismatches on first fetch. */
+	MXCM55->CM55_S_VECTOR_TABLE_BASE = m55_vectors;
 	MXCM55->CM55_NS_VECTOR_TABLE_BASE = m55_vectors;
 
 	/* Same power-dependency sequence ifx_pse84_cm55_startup does right
