@@ -159,7 +159,7 @@
     },
     "oem_app_address": {
       "description": "Starting location of OEM application",
-      "value": "0x32011000"
+      "value": "0x18100000"
     },
     "oem_alt_boot": {
       "description": "Disable/Enable alternate boot by setting the value to false/true",

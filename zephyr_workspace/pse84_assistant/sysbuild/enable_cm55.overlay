@@ -33,8 +33,14 @@
  * stopped and the mismatch became visible. Linking here at the RRAM
  * SBUS Secure alias 0x32011400 matches the bytes the script writes.
  */
-&m33s_header { reg = <0x22011000 0x400>; };
-&m33s_xip    { reg = <0x32011400 DT_SIZE_K(356)>; };
+/* Flip back to SMIF0 placement: oem_app_address=0x18100000 makes
+ * extended-boot power and XIP-configure SMIF0 before jumping to our
+ * M33 image. That also leaves SMIF0 fully mapped for CM55 XIP from
+ * m55_xip (without which CM55 double-faults seconds after release).
+ * m33s_header at 0x60100000 for openocd flash write (NS alias for
+ * SMIF0), m33s_xip linked at 0x18100400 (Secure Code alias). */
+&m33s_header { reg = <0x60100000 0x400>; };
+&m33s_xip    { reg = <0x18100400 DT_SIZE_K(2300)>; };
 / { chosen { zephyr,flash = &m33s_xip; }; };
 
 &clk_hf12 {
