@@ -80,12 +80,14 @@ static struct k_thread ble_thread;
 
 int ble_init(void)
 {
+	printk("[ble_init] spawning thread\n");
 	LOG_INF("ble: spawning bt_enable thread");
-	k_thread_create(&ble_thread, ble_thread_stack,
+	k_tid_t tid = k_thread_create(&ble_thread, ble_thread_stack,
 			K_THREAD_STACK_SIZEOF(ble_thread_stack),
 			ble_thread_fn, NULL, NULL, NULL,
 			K_PRIO_PREEMPT(7), 0, K_NO_WAIT);
 	k_thread_name_set(&ble_thread, "ble");
+	printk("[ble_init] thread created tid=%p\n", (void *)tid);
 	return 0;
 }
 

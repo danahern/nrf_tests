@@ -215,6 +215,10 @@ int main(void)
 		LOG_ERR("link_init failed; host text replies won't render");
 	}
 
+	if (ble_init() != 0) {
+		LOG_ERR("ble_init failed; Phase 4 BLE disabled");
+	}
+
 #if defined(CONFIG_IPC_SERVICE)
 	/* Phase 0b.7: prove ipc_service + mbox stack opens cleanly on M55.
 	 * Endpoint "assistant" is register-only — there's no M33 peer yet,

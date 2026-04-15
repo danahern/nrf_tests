@@ -1,0 +1,15 @@
+common:
+  tags:
+    - pse84_assistant
+    - mbox
+  # PDL header is only provided by the test shim on native_sim. HW and
+  # QEMU M55 platforms get the real hal_infineon PDL and a full SoC
+  # build — out of scope for Phase 0b.1 (tracked as 0b.2 onwards).
+  platform_allow:
+    - native_sim
+    - native_sim/native/64
+  integration_platforms:
+    - native_sim
+    - native_sim/native/64
+tests:
+  pse84_assistant.mbox_pse84: {}

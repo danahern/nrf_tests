@@ -86,6 +86,12 @@ i2c0: &scb0 {
 			zephyr,memory-region = "SOCMEM_SPRITE";
 		};
 
+		/* Phase 4: 64 KiB PCM ring in SOCMEM so the BT host has SRAM. */
+		socmem_audio: memory@26440000 {
+			compatible = "zephyr,memory-region", "mmio-sram";
+			reg = <0x26440000 DT_SIZE_K(64)>;
+			zephyr,memory-region = "SOCMEM_AUDIO";
+		};
 	};
 };
 
@@ -304,4 +310,53 @@ dmic_dev: &dmic0 {
 	};
 };
 
-/* Phase 4 BLE on M55 (SCB4 → CYW55513) — disabled until baseline confirmed. */
+/*
+ * Phase 4 — BLE HCI UART to onboard CYW55513 AIROC via SCB4.
+ * Mirrors kit_pse84_ai_m55.dts (M55-primary sibling kit, same radio).
+ */
+&peri0_group1_16_5bit_0 {
+	status = "okay";
+	clock-div = <1>;
+};
+
+&gpio_prt11 {
+	status = "okay";
+};
+
+&gpio_prt10 {
+	status = "okay";
+};
+
+uart4: &scb4 {
+	compatible = "infineon,uart";
+	status = "okay";
+	current-speed = <115200>;
+	clocks = <&peri0_group1_16_5bit_0>;
+	pinctrl-0 = <&p10_1_scb4_uart_tx &p10_0_scb4_uart_rx
+		     &p10_3_scb4_uart_rts &p10_2_scb4_uart_cts>;
+	pinctrl-names = "default";
+	hw-flow-control;
+
+	bt_hci_uart: bt_hci_uart {
+		compatible = "zephyr,bt-hci-uart";
+
+		cyw55513 {
+			status = "okay";
+			compatible = "infineon,bt-hci-uart";
+			bt-reg-on-gpios = <&gpio_prt11 0 GPIO_ACTIVE_HIGH>;
+			fw-download-speed = <115200>;
+			hci-operation-speed = <115200>;
+		};
+	};
+};
+
+&p10_1_scb4_uart_tx { drive-push-pull; };
+&p10_0_scb4_uart_rx { input-enable; };
+&p10_3_scb4_uart_rts { drive-push-pull; };
+&p10_2_scb4_uart_cts { input-enable; };
+
+/ {
+	chosen {
+		zephyr,bt-hci = &bt_hci_uart;
+	};
+};
