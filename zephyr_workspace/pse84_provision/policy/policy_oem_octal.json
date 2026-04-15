@@ -163,7 +163,7 @@
     },
     "oem_alt_boot": {
       "description": "Disable/Enable alternate boot by setting the value to false/true",
-      "value": true
+      "value": false
     },
     "oem_alt_app_address": {
       "description": "Alternate starting location of OEM application",
