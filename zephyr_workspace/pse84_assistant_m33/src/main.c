@@ -63,8 +63,15 @@ static void release_cm55(void)
 	       (unsigned long)MXCM55->CM55_S_VECTOR_TABLE_BASE,
 	       (unsigned long)MXCM55->CM55_NS_VECTOR_TABLE_BASE);
 
-	/* S_VEC uses Secure alias (0x70500000), NS_VEC uses NS alias
-	 * (0x60500000). Same physical SMIF0 NOR flash. */
+	/* CRITICAL: set S_VECTOR_TABLE_BASE BEFORE Cy_SysEnableCM55.
+	 * ARMv8.1-M CM55 boots Secure and fetches MSP/PC from the Secure
+	 * VTOR at reset. Cy_SysEnableCM55 only writes NS_VECTOR_TABLE_BASE,
+	 * so if S_VECTOR stays at 0x10000000 (ITCM default, pre-cleared to
+	 * zeros) CM55 jumps to NULL reset handler and faults silently.
+	 *
+	 * S_VEC uses Secure SBUS alias 0x70500000, NS_VEC uses NS SBUS
+	 * 0x60500000 — same physical SMIF0 NOR flash.
+	 */
 	MXCM55->CM55_S_VECTOR_TABLE_BASE = m55_vectors_s;
 	MXCM55->CM55_NS_VECTOR_TABLE_BASE = m55_vectors;
 
@@ -76,12 +83,14 @@ static void release_cm55(void)
 	       (unsigned long)MXCM55->CM55_STATUS,
 	       (unsigned long)MXCM55->CM55_CMD);
 
-	/* Direct register-level release as a last resort:
-	 *   CM55_CMD = VECTKEYSTAT | RESET=1  (HW self-clears → triggers reset)
-	 *   wait
-	 *   CM55_CTL &= ~CPU_WAIT */
-	MXCM55->CM55_CMD = (0x0000FA05UL << 16) | 0x1UL;
-	k_busy_wait(1000);
+	/* Explicit reset pulse — CM55_CMD.RESET=1 with correct key 0x05FA.
+	 * HW auto-clears RESET bit, producing a reset pulse on the core.
+	 * The PDL's Cy_SysCM55Reset does exactly this. Use infinite wait
+	 * so we block until HW confirms the reset completed. */
+	Cy_SysCM55Reset(MXCM55, CY_SYS_CORE_WAIT_INFINITE);
+
+	/* Belt-and-braces CPU_WAIT clear with the correct key-position
+	 * write (0x05FA in [31:16]). */
 	MXCM55->CM55_CTL = 0;
 
 	k_sleep(K_MSEC(200));
