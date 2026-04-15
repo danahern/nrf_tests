@@ -288,6 +288,50 @@ range"). Arch ref §17.2.4.2.3 examples use `0x70100000` (SBUS Secure
 SMIF0), not CBUS. Changed to `oem_app_address: 0x70100000` and
 re-provisioned. That boots fine and extended-boot powers SMIF0.
 
+### End-of-session status (2026-04-15 evening)
+
+**Working:**
+- Extended-boot launches our M33 image cleanly from SMIF0
+  (`oem_app_address: 0x70100000`, `oem_alt_boot: false`).
+- M33 Zephyr boot banner, IPC endpoint 'assistant' registers,
+  heartbeats tick every 5 s.
+- Mac host bridge end-to-end verified via `bridge.py
+  --transport=file-inject --fake-transcript ... --ollama-model
+  glm-4.7-flash:latest` — reply "Paris is the capital of France."
+  streamed back cleanly.
+
+**Not working — M55 voice assistant doesn't boot:**
+- `release_cm55()` on M33 calls Cy_System_EnablePD1 + peri groups +
+  SOCMEM + Cy_SysEnableCM55 + Cy_SysCM55Reset + direct CPU_WAIT
+  clear. Register dumps post-release show CTL=0, CMD VECTKEYSTAT
+  accepted (0xFA05 readback), S_VEC=0x70500000, NS_VEC=0x60500000.
+- Halting CM55 reports PC=0x3ff00, SP=0x100 — CPU_WAIT pre-init
+  state. openocd says "Clearing CPU_WAIT" on debug-attach, which
+  obscures whether CM55 actually started.
+- Switching to `CONFIG_SOC_PSE84_M55_ENABLE=y` to use the full
+  `ifx_pse84_cm55_startup` faults M33 in `cy_mpc_init` at APPCPUSS
+  MPC (0x54463000) — same fault observed on RRAM policy earlier.
+
+**Suspected root cause:** extended-boot's MPC regions don't grant
+CM55 access to SMIF0 XIP, and our minimal release skips the
+cy_mpc_init that would fix this. cy_mpc_init itself faults on
+already-configured APPCPUSS entries. Needs a surgical patch writing
+only M55-facing MPC entries without touching the locked-down
+APPCPUSS rows.
+
+**Next steps:**
+- Read M55 MPC entries directly from a known-good example
+  (e.g. the Avnet voice-assistant reference in
+  `/Users/danahern/mtw/Avnet_PSOC_Edge_DEEPCRAFT_Voice_Assistant/`)
+  and apply only those in release_cm55.
+- Alternative: drop M55 image down to a minimal bare-metal main
+  that just writes a pattern to SOCMEM; poll that pattern from
+  M33 to prove CM55 executed at all.
+- BT/BLE/WiFi bring-up (Phase 4) is blocked on M55 running, since
+  ble.c is on M55.
+
+---
+
 ### openocd SMIF0 bank was capped at 16 MB (silent flash truncation)
 
 Running chip booted a 3-commits-old image despite "wrote 11534336
