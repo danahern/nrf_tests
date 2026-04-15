@@ -73,26 +73,27 @@ static const cy_stc_mpc_rot_cfg_t m33_m55_cfg[] = {
 	{ .pc = CY_MPC_PC_7, .secure = CY_MPC_SECURE,     .access = CY_MPC_ACCESS_RW },
 };
 struct mpc_region { MPC_Type *base; uint32_t offset; uint32_t size; };
-/* SMIF0 M55 aperture — 58 MB with OCTAL, capped to stay under the
- * 64 MB CY_XIP_PORT0_SIZE boundary bug (pse84_s_protection.c note). */
+/* Wide-open MPC on the two blocks M33 can safely write: SMIF0 and
+ * SOCMEM. RAMC0 / RAMC1 / RRAMC0 / SMIF1 MPC registers fault when M33
+ * tries to write them after extended-boot has attributed them. */
 static const struct mpc_region m55_regions[] = {
-	{ (MPC_Type *)SMIF0_CACHE_BLOCK_CACHEBLK_AHB_MPC0, 0x00500000, 0x03A00000 },
-	{ (MPC_Type *)SMIF0_CORE_AXI_MPC0,                  0x00500000, 0x03A00000 },
-	{ (MPC_Type *)SOCMEM_SRAM_MPC0,                     0x00000000, 0x00040000 },
+	{ (MPC_Type *)SMIF0_CACHE_BLOCK_CACHEBLK_AHB_MPC0, 0x00000000, 0x04000000 },
+	{ (MPC_Type *)SMIF0_CORE_AXI_MPC0,                  0x00000000, 0x04000000 },
+	{ (MPC_Type *)SOCMEM_SRAM_MPC0,                     0x00000000, 0x00500000 },
 };
-/* Shared M33/M55 SOCMEM only — RRAMC and RAMC MPC blocks fault when
- * M33 tries to re-configure them after extended-boot has attributed
- * them (observed fault at Cy_Mpc_ConfigRotMpcStruct accessing 0x52211000
- * RRAMC MPC register). SOCMEM is the critical one for IPC shared mem
- * and framebuffers. Leave RAMC alone — CM55 doesn't use our RAMC1. */
+/* Unused — m55_regions covers SOCMEM entirely now. Leave the array
+ * so apply_mpc can iterate 0 rows. */
 static const struct mpc_region m33_m55_regions[] = {
-	{ (MPC_Type *)SOCMEM_SRAM_MPC0, 0x00040000, 0x004C0000 },
+	{ 0 },
 };
 
 static void apply_mpc(const cy_stc_mpc_rot_cfg_t *cfg, size_t cfg_n,
 		      const struct mpc_region *regions, size_t regions_n)
 {
 	for (size_t r = 0; r < regions_n; r++) {
+		if (regions[r].base == NULL) {
+			continue;
+		}
 		for (size_t c = 0; c < cfg_n; c++) {
 			(void)Cy_Mpc_ConfigRotMpcStruct(regions[r].base,
 							regions[r].offset,
