@@ -183,3 +183,104 @@ the alt-boot flag was.
 - Confirm log tunnel binds (need M55 to register `assistant` ipc peer).
 - Verify `bt_enable()` path (previous session was blocked; unrelated
   to this fix).
+
+---
+
+## 2026-04-14 evening — follow-on work
+
+### Fix: sysbuild M33 overlay linked at SMIF0, not RRAM
+
+`pse84_assistant/sysbuild/enable_cm55.overlay` had
+`&m33s_xip { reg = <0x18100400 ...>; };` with a comment claiming that
+"Cortex-M fetches instructions via CBUS — SBUS is data-only for code
+regions on this SoC." That comment was wrong:
+
+- 0x18100400 is **SMIF0 Secure C-AHB XIP** (external NOR flash), not
+  RRAM at all (arch ref §2.2.6 Table 4).
+- The RRAM C-AHB Secure alias is 0x12000000–0x1207FFFF; RRAM S-AHB
+  Secure is 0x32000000–0x3207FFFF. Both are valid for code.
+
+The linked-at-SMIF0 image silently "worked" only because
+`oem_alt_boot=true` + P17.6-high was making extended-boot jump to
+`oem_alt_app_address=0x70100000` (SMIF0 alt slot), running whatever
+stale bytes had been programmed there by prior `west flash` runs. Once
+the alt-boot was disabled the real address mismatch surfaced: the
+bytes the script writes live in RRAM, but the linker produced an
+image that expected to XIP from SMIF0.
+
+Fixed in commit on pse84-voice-assistant by restoring the overlay to
+`&m33s_xip { reg = <0x32011400 DT_SIZE_K(356)>; };`.
+
+### Missing M55 IPC config on M55 prj.conf
+
+`pse84_assistant/prj.conf` was missing CONFIG_MBOX / CONFIG_IPC_SERVICE
+/ CONFIG_IPC_SERVICE_BACKEND_ICMSG. The M33 companion config had them
+but M55's side of the ipc tunnel (log_tunnel.c) linked against
+undefined `ipc_service_send`. Added the three kconfigs to M55 prj.conf.
+
+### Fix: ui_reply_active outside CONFIG_APP_ANIMATION_PROCEDURAL
+
+`src/ui.c` had `static bool ui_reply_active;` gated inside the
+PROCEDURAL `#ifdef` but the consumers (`ui_append_reply_text` /
+`ui_clear_reply_text`) are unconditional. With the current
+CONFIG_APP_ANIMATION_SPRITES build the symbol was undeclared. Moved
+the declaration outside the `#ifdef`.
+
+### CM55 release under policy_oem_octal
+
+Earlier project memory claimed "policy_oem_octal: extended-boot
+releases CM55 itself." Empirically wrong — after the alt_boot fix,
+CM55 stays at PC=0x0003ff00, SP=0x100 (CPU_WAIT) unless the M33
+explicitly calls Cy_SysEnableCM55().
+
+### `CONFIG_SOC_PSE84_M55_ENABLE=y` bus-faults on re-running MPC init
+
+Enabling `ifx_pse84_cm55_startup()` in soc_late_init_hook crashes
+with a precise bus fault at `0x54463000` (APPCPUSS peripheral secure
+region) during `cy_mpc_init` → `Cy_Mpc_ConfigRotMpcStruct`. LR points
+into `m33s_mpc_cfg` at `0x32026157`; PC=0x00000001 (call-through-NULL).
+Extended-boot has already attributed these regions per policy, so the
+re-run writes registers that aren't clocked/accessible.
+
+Attempted fix: patch pse84_boot.c to gate `cy_mpc_init()` and
+`cy_ppc_init()` behind a new Kconfig `INFINEON_EXTENDED_BOOT_DID_MPC`.
+That cleared the MPC fault but surfaced a downstream bus fault at
+`BFAR=0x240fe004` (ipc_tx shared-memory region) — the MPC gating left
+our Secure M33 without rights to its own IPC shared RAM. Reverted.
+
+### Current workaround: manual release from main()
+
+`CONFIG_SOC_PSE84_M55_ENABLE=n`; M33's `main()` calls `release_cm55()`:
+Cy_System_EnablePD1 + peri-group init + Cy_SysEnableSOCMEM +
+Cy_SysEnableCM55. Register probes show post-release:
+- CM55_CTL=0 (CPU_WAIT cleared)
+- CM55_CMD self-cleared RESET bit (reset pulse took)
+- S_VEC=0x70500000 (Secure SMIF0 alias of m55_xip)
+- STATUS=0 (=ACTIVE per the PDL define — CM55 awake)
+
+Halting CM55 after 2s: openocd reports "clearing lockup after double
+fault", PC=0xeffffffe, MSP=0xffffffe0. So CM55 is being released
+correctly but immediately hits a fault and double-faults.
+
+### Root cause (suspected): SMIF0 not XIP-configured when oem_app is in RRAM
+
+Per arch ref §17.2.4.2.2: "The extended boot powers on and configures
+the external flash only when the application launch address is
+located within the external flash." Our `oem_app_address=0x32011000`
+is RRAM, so extended-boot doesn't fully configure SMIF0 (only enough
+for clock — evidence: 0x18500000 CBUS Secure returns real bytes, but
+0x60500000 NS SBUS errors from openocd's M33 context). CM55 fetches
+vectors OK (Secure CBUS) but hits a fault on subsequent XIP reads.
+
+### Next attempt: move M33 image to SMIF0
+
+Changed overlay to `m33s_header: 0x60100000`, `m33s_xip: 0x18100400`
+(SMIF0 Secure code alias) and policy `oem_app_address: 0x18100000`.
+Extended-boot then powers + XIP-configures SMIF0, and both cores can
+XIP from it. Standard `west flash` places both images on SMIF0.
+Re-provisioned 2026-04-15.
+
+Disabled CONFIG_INFINEON_SMIF_PSRAM on the M33 companion for now to
+keep the CM55 release path lean — the voice-assistant bring-up
+doesn't need HyperRAM yet; can re-enable once everything else is
+running.
