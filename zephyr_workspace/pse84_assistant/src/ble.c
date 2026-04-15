@@ -50,13 +50,18 @@ BT_CONN_CB_DEFINE(conn_callbacks) = {
 	.disconnected = disconnected_cb,
 };
 
-int ble_init(void)
+/* bt_enable can block for ~1–2 s while the CYW55513 firmware loads.
+ * Run it on a dedicated thread so main() keeps ticking audio / UI and
+ * we can watch progress via LOG_INF at every step. */
+static void ble_thread_fn(void *a, void *b, void *c)
 {
-	LOG_INF("bt_enable()…");
+	ARG_UNUSED(a); ARG_UNUSED(b); ARG_UNUSED(c);
+
+	LOG_INF("ble thread: bt_enable()…");
 	int err = bt_enable(NULL);
 	if (err) {
 		LOG_ERR("bt_enable failed: %d", err);
-		return err;
+		return;
 	}
 	LOG_INF("bt_enable ok; starting advertising (name='%s')",
 		CONFIG_BT_DEVICE_NAME);
@@ -65,9 +70,22 @@ int ble_init(void)
 			      ARRAY_SIZE(adv_data), NULL, 0);
 	if (err) {
 		LOG_ERR("adv start failed: %d", err);
-		return err;
+		return;
 	}
 	LOG_INF("advertising as '%s'", CONFIG_BT_DEVICE_NAME);
+}
+
+K_THREAD_STACK_DEFINE(ble_thread_stack, 4096);
+static struct k_thread ble_thread;
+
+int ble_init(void)
+{
+	LOG_INF("ble: spawning bt_enable thread");
+	k_thread_create(&ble_thread, ble_thread_stack,
+			K_THREAD_STACK_SIZEOF(ble_thread_stack),
+			ble_thread_fn, NULL, NULL, NULL,
+			K_PRIO_PREEMPT(7), 0, K_NO_WAIT);
+	k_thread_name_set(&ble_thread, "ble");
 	return 0;
 }
 
