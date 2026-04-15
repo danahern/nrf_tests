@@ -225,10 +225,11 @@ int main(void)
 		const struct device *ipc_dev =
 			DEVICE_DT_GET(DT_NODELABEL(assistant_ipc0));
 		static struct ipc_ept ipc_ep;
+		extern void log_tunnel_on_bound(void *priv);
 		static const struct ipc_ept_cfg ipc_cfg = {
 			.name = "assistant",
 			.cb = {
-				.bound = NULL,
+				.bound = log_tunnel_on_bound,
 				.received = NULL,
 			},
 			.priv = NULL,

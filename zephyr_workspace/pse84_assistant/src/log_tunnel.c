@@ -33,10 +33,31 @@ LOG_OUTPUT_DEFINE(log_tunnel_output, log_tunnel_char_out,
  * ipc_service_send inline. If it fails (no peer bound / short
  * shared-mem) we drop, which is fine for observability logs.
  */
+/* Toggled true once the M33 ipc peer fires its .bound callback.
+ * Until then, ipc_service_send to icmsg may block on the handshake
+ * semaphore, and that hang stalls the LOG processing thread —
+ * silencing every subsequent log line. */
+static volatile bool tunnel_peer_bound;
+
+void log_tunnel_set_peer_bound(bool bound)
+{
+	tunnel_peer_bound = bound;
+}
+
+/* Wired into ipc_ept_cfg.cb.bound so the LOG path opens automatically
+ * once the M33 peer comes up — and stays closed/non-blocking until
+ * then. Without this, ipc_service_send hangs the LOG processing
+ * thread when the peer isn't running, silencing every subsequent log. */
+void log_tunnel_on_bound(void *priv)
+{
+	ARG_UNUSED(priv);
+	tunnel_peer_bound = true;
+}
+
 static int log_tunnel_char_out(uint8_t *data, size_t length, void *ctx)
 {
 	ARG_UNUSED(ctx);
-	if (tunnel_ep != NULL) {
+	if (tunnel_ep != NULL && tunnel_peer_bound) {
 		(void)ipc_service_send(tunnel_ep, data, length);
 	}
 	return (int)length;

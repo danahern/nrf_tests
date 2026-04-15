@@ -86,17 +86,6 @@ i2c0: &scb0 {
 			zephyr,memory-region = "SOCMEM_SPRITE";
 		};
 
-		/*
-		 * Phase 4: 64 KiB PCM ring in SOCMEM, immediately past the
-		 * sprite scratch region. Keeps audio.c's 2 s capture buffer
-		 * out of the 132 KB M55 SRAM so the Zephyr BT stack has
-		 * room to breathe.
-		 */
-		socmem_audio: memory@26440000 {
-			compatible = "zephyr,memory-region", "mmio-sram";
-			reg = <0x26440000 DT_SIZE_K(64)>;
-			zephyr,memory-region = "SOCMEM_AUDIO";
-		};
 	};
 };
 
@@ -315,80 +304,4 @@ dmic_dev: &dmic0 {
 	};
 };
 
-/*
- * Phase 4 — BLE HCI UART to the onboard CYW55513 AIROC combo.
- *
- * Pins P10.0-P10.3 on SCB4 are the HCI UART (H4, HW flow control).
- * gpio_prt11 P0 is BT_REG_ON. The standard pattern comes from
- * kit_pse84_ai_m55.dts (M55-primary sibling kit that uses the same
- * radio). Speeds match the defaults baked into the CYW55513 firmware
- * download flow (115200 for both FW download and operation).
- *
- * Zephyr BLE runs on M55 here rather than the "canonical" M33 split
- * because the M33 flash iteration is currently blocked (extended-boot
- * parks CM33 regardless of what we flash into RRAM — see
- * project_pse84_m33_flash_slot_mystery.md). Putting the BT stack on
- * M55 unblocks Phase 4 progress at the cost of using a bit more of
- * M55's cycles; revisit once the M33 boot path is resolved.
- */
-&peri0_group1_16_5bit_0 {
-	status = "okay";
-	clock-div = <1>;
-};
-
-&gpio_prt11 {
-	status = "okay";
-};
-
-&gpio_prt10 {
-	status = "okay";
-};
-
-uart4: &scb4 {
-	compatible = "infineon,uart";
-	status = "okay";
-
-	current-speed = <115200>;
-
-	clocks = <&peri0_group1_16_5bit_0>;
-
-	pinctrl-0 = <&p10_1_scb4_uart_tx &p10_0_scb4_uart_rx
-		     &p10_3_scb4_uart_rts &p10_2_scb4_uart_cts>;
-	pinctrl-names = "default";
-
-	hw-flow-control;
-
-	bt_hci_uart: bt_hci_uart {
-		compatible = "zephyr,bt-hci-uart";
-
-		cyw55513 {
-			status = "okay";
-			compatible = "infineon,bt-hci-uart";
-			bt-reg-on-gpios = <&gpio_prt11 0 GPIO_ACTIVE_HIGH>;
-			fw-download-speed = <115200>;
-			hci-operation-speed = <115200>;
-		};
-	};
-};
-
-&p10_1_scb4_uart_tx {
-	drive-push-pull;
-};
-
-&p10_0_scb4_uart_rx {
-	input-enable;
-};
-
-&p10_3_scb4_uart_rts {
-	drive-push-pull;
-};
-
-&p10_2_scb4_uart_cts {
-	input-enable;
-};
-
-/ {
-	chosen {
-		zephyr,bt-hci = &bt_hci_uart;
-	};
-};
+/* Phase 4 BLE on M55 (SCB4 → CYW55513) — disabled until baseline confirmed. */
