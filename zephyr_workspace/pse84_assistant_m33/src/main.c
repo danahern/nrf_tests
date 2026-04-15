@@ -19,6 +19,7 @@
 #include "cy_syslib.h"
 #include "cy_sysclk.h"
 #include "cy_syspm.h"
+#include "cy_syspm_pdcm.h"
 
 LOG_MODULE_REGISTER(pse84_assistant_m33, LOG_LEVEL_INF);
 
@@ -74,6 +75,15 @@ static void release_cm55(void)
 	 */
 	MXCM55->CM55_S_VECTOR_TABLE_BASE = m55_vectors_s;
 	MXCM55->CM55_NS_VECTOR_TABLE_BASE = m55_vectors;
+
+	/* Same power-dependency sequence ifx_pse84_cm55_startup does right
+	 * before Cy_SysEnableCM55. Clears power-domain dependencies so the
+	 * APPCPU PPU can be powered on cleanly and not re-forced into
+	 * dependence on SYSCPU. Without these, APPCPU may fail to reach
+	 * PPU_V1_MODE_ON inside Cy_SysCM55Enable and the post-reset release
+	 * sequence silently no-ops. */
+	cy_pd_pdcm_clear_dependency(CY_PD_PDCM_APPCPUSS, CY_PD_PDCM_SYSCPU);
+	cy_pd_pdcm_clear_dependency(CY_PD_PDCM_APPCPU, CY_PD_PDCM_SYSCPU);
 
 	printk("[m33] vectors set, calling Cy_SysEnableCM55 (waitus=100000)\n");
 	Cy_SysEnableCM55(MXCM55, m55_vectors, 100000U);
