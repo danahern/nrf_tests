@@ -57,6 +57,12 @@ struct ui_scene {
 
 static struct ui_scene ui;
 
+/* Forward-declared so typing_timer_cb (inside the PROCEDURAL #ifdef)
+ * can honour the "real reply streaming" suppression flag. Actual
+ * storage is defined in the unconditional reply-accumulator block
+ * further down. */
+static bool ui_reply_active;
+
 #ifdef CONFIG_APP_ANIMATION_PROCEDURAL
 /* ---- animation callbacks (LVGL calls these with int32_t values) ---- */
 
@@ -192,11 +198,6 @@ static void build_thinking_group(lv_obj_t *parent)
 #endif
 }
 
-/* Forward-declare — actual storage + mutator live below the procedural
- * block, but typing_timer_cb needs to honor the "real reply active"
- * suppression flag.
- */
-static bool ui_reply_active;
 
 static void typing_timer_cb(lv_timer_t *t)
 {
@@ -250,7 +251,6 @@ static void build_responding_group(lv_obj_t *parent)
 #define UI_REPLY_BUF_CAP 1024
 static char ui_reply_buf[UI_REPLY_BUF_CAP + 1];
 static int  ui_reply_len;
-/* ui_reply_active is forward-declared above typing_timer_cb. */
 
 void ui_append_reply_text(const char *utf8, int len)
 {

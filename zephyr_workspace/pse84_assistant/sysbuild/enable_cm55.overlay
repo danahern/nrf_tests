@@ -17,23 +17,24 @@
 /*
  * RRAM boot slot. Extended-boot per OEM policy jumps to
  * oem_app_address = 0x32011000 (SBUS Secure alias of RRAM) and reads
- * the mcuboot header + vector table from there.
+ * the mcuboot header + vector table from there. The M33 image is
+ * then signed with edgeprotecttools image-metadata and written to
+ * RRAM at 0x22011000 (NS SBUS alias — openocd bank #0
+ * cat1d.cm33.main_ns) via tools/flash_m33_rram.sh.
  *
- * The vector table's reset vector, however, must point into the
- * CBUS Secure alias (0x18...) because Cortex-M fetches instructions
- * via CBUS — SBUS is data-only for code regions on this SoC. So
- * the m33s_xip partition reg (which drives the linker's ROM base)
- * has to be the CBUS Secure alias 0x18100400, while m33s_header
- * stays at the SBUS NS alias 0x22011000 so openocd's RRAM flash
- * bank (cat1d.cm33.main_ns) can write the bytes. Both aliases map
- * to the same physical RRAM cells.
- *
- * Mismatch here (code linked for SBUS 0x32011400) produces a reset
- * vector pointing into SBUS, which then HardFaults on the first
- * instruction fetch — observed 2026-04-14 before this fix.
+ * Earlier iteration (pre-2026-04-14) linked m33s_xip at 0x18100400
+ * which is SMIF0 Secure XIP — not RRAM at all. That silently "worked"
+ * only because policy_oem_octal had oem_alt_boot=true and kit P17.6
+ * is tied high, so extended-boot took the alt path to 0x70100000
+ * (SMIF0) and ran the stale image that `west flash` had written
+ * there. Once oem_alt_boot was disabled (see
+ * zephyr_workspace/pse84_provision/policy/policy_oem_octal.json and
+ * docs/pse84_m33_rram_investigation.md on main), the SMIF0 detour
+ * stopped and the mismatch became visible. Linking here at the RRAM
+ * SBUS Secure alias 0x32011400 matches the bytes the script writes.
  */
 &m33s_header { reg = <0x22011000 0x400>; };
-&m33s_xip    { reg = <0x18100400 DT_SIZE_K(356)>; };
+&m33s_xip    { reg = <0x32011400 DT_SIZE_K(356)>; };
 / { chosen { zephyr,flash = &m33s_xip; }; };
 
 &clk_hf12 {
