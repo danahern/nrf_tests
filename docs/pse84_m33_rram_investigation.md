@@ -280,6 +280,40 @@ Extended-boot then powers + XIP-configures SMIF0, and both cores can
 XIP from it. Standard `west flash` places both images on SMIF0.
 Re-provisioned 2026-04-15.
 
+### Extended-boot rejects 0x18100000 as oem_app_address
+
+Boot status 0x34000004 returned `0xEE000024 IFX_ERR_UNKNOWN_MEMORY_RANGE`
+("Boot address of the next application belongs to unknown memory
+range"). Arch ref §17.2.4.2.3 examples use `0x70100000` (SBUS Secure
+SMIF0), not CBUS. Changed to `oem_app_address: 0x70100000` and
+re-provisioned. That boots fine and extended-boot powers SMIF0.
+
+### openocd SMIF0 bank was capped at 16 MB (silent flash truncation)
+
+Running chip booted a 3-commits-old image despite "wrote 11534336
+bytes" success message. `flash banks` showed:
+```
+#2 : cat1d.cm33.smif1_ns at 0x60000000, size 0x01000000 (16 MB)
+```
+M55 ELF extends to 0x61D33E18 (~29 MB). openocd silently dropped
+records with `:02000004610x...` upper-address. Chip ran the
+stale-image leftover.
+
+Fix: set env `SMIF_OCTAL=1` so `qspi_config.cfg` declares a 64 MB
+bank at slot 0. Must pair with `SMIF_OCTAL_FLM=/path/to/patched-FLM`
+pointing to
+`zephyr_workspace/pse84_octal_enablement/cycfg_octal_generated/PSE84_SMIF.FLM`
+(generated via MTB qspi-configurator-cli for S28HS01GT octal). With
+both vars set, `flash banks` shows:
+```
+#2 : cat1d.cm33.smif0_ns at 0x60000000, size 0x04000000 (64 MB)
+```
+and the full M55 image writes.
+
+Also included `kit_pse84_eval_octal_64mb.overlay` in pse84_assistant
+M55 overlay so the Zephyr-side flash0 reg matches (64 MB vs stock
+16 MB). Was: stock 16 MB flash0 + 40 MB m55_xip override = incoherent.
+
 Disabled CONFIG_INFINEON_SMIF_PSRAM on the M33 companion for now to
 keep the CM55 release path lean — the voice-assistant bring-up
 doesn't need HyperRAM yet; can re-enable once everything else is
