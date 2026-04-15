@@ -1,14 +1,12 @@
 #include <zephyr/dt-bindings/display/panel.h>
+#include "../../zephyrproject/zephyr/boards/infineon/kit_pse84_eval/kit_pse84_eval_octal_64mb.overlay"
 
 /*
- * Extend the M55 XIP partition to 24 MB to hold the Phase 1b branded
- * sprite assets (~11 MiB at tier A 800x480, LZ4-compressed — see
- * assets/TIER_LOG.md) alongside the app text + LVGL + libopus. The
- * 58 MB octal-NOR XIP aperture at 0x60100000 has plenty of headroom;
- * 24 MB leaves ~34 MB for future phases. Safe because the M55 is loaded
- * by Cy_SysEnableCM55() directly from this region and is not
- * mcuboot-signed, so no slot-size math changes are needed in the
- * signing pipeline.
+ * kit_pse84_eval_octal_64mb overlay bumps flash0 reg to 64 MB so
+ * openocd's smif1_ns bank covers the whole XIP aperture (previously
+ * capped at 16 MB, silently dropping M55 hex bytes > 0x61000000 and
+ * leaving the chip running a stale image). Keeps the 40 MB m55_xip
+ * size this app needs for sprite assets + code.
  */
 &m55_xip {
 	reg = <0x60500000 DT_SIZE_M(40)>;
