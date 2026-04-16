@@ -15,9 +15,13 @@ target_sources(app PRIVATE
     src/opus_wrapper.c
     src/audio.c
     src/link.c
-    src/log_tunnel.c
     src/ble.c
 )
+# log_tunnel.c depends on CONFIG_IPC_SERVICE. Skip it for the
+# minimal-M33-companion bring-up test where IPC isn't wired.
+if(CONFIG_IPC_SERVICE)
+    target_sources(app PRIVATE src/log_tunnel.c)
+endif()
 
 # ui.c pulls in LVGL headers unconditionally; only compile it when
 # CONFIG_LVGL=y. The QEMU M55 smoke-test build

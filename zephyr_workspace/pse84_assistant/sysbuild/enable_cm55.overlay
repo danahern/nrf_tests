@@ -1,96 +1,20 @@
 /*
- * M33 (Secure) companion overlay applied by sysbuild to the enable_cm55
- * image. This image boots from RRAM, not from SMIF — so we override
- * m33s_header / m33s_xip to the RRAM slot the OEM policy's
- * oem_app_address (0x32011000) points at. Without this, the linker
- * places code at 0x18100400 (internal-flash-alias XIP) and `west flash`
- * writes bytes to SMIF at 0x60100000 — neither of which is the boot
- * slot, and the chip silently keeps running whatever stale M33 was
- * previously provisioned. The pse84_i2c_test kit app uses the same
- * RRAM-slot override (see its boards/.../m33.overlay).
+ * M33 companion overlay: force CLK_HF12 to run at 25 MHz.
  *
- * CLK_HF12 override feeds the MIPI-DSI D-PHY PLL on the M55.
+ * The demo uses external 24 MHz oscillator via CLKPATH4 → CLK_HF12, which
+ * feeds the MIPI-DSI D-PHY PLL reference. Zephyr's board DTS sets HF12 to
+ * CLKPATH4 too, but the path_mux4 source defaults to no running clock →
+ * HF12 = 0 Hz → D-PHY PLL never locks → cy_mipi_dsi_dphy_enable() waits
+ * forever in its unbounded PHY_LOCK polling loop.
+ *
+ * Fix: route CLK_HF12 to CLKPATH0 (DPLL_LP0 = 400 MHz) with divide-by-16
+ * to get 25 MHz — close enough to 24 MHz for the D-PHY PLL lock range.
  */
 
 #include <zephyr/dt-bindings/clock/ifx_clock_source_common.h>
-
-/*
- * RRAM boot slot. Extended-boot per OEM policy jumps to
- * oem_app_address = 0x32011000 (SBUS Secure alias of RRAM) and reads
- * the mcuboot header + vector table from there. The M33 image is
- * then signed with edgeprotecttools image-metadata and written to
- * RRAM at 0x22011000 (NS SBUS alias — openocd bank #0
- * cat1d.cm33.main_ns) via tools/flash_m33_rram.sh.
- *
- * Earlier iteration (pre-2026-04-14) linked m33s_xip at 0x18100400
- * which is SMIF0 Secure XIP — not RRAM at all. That silently "worked"
- * only because policy_oem_octal had oem_alt_boot=true and kit P17.6
- * is tied high, so extended-boot took the alt path to 0x70100000
- * (SMIF0) and ran the stale image that `west flash` had written
- * there. Once oem_alt_boot was disabled (see
- * zephyr_workspace/pse84_provision/policy/policy_oem_octal.json and
- * docs/pse84_m33_rram_investigation.md on main), the SMIF0 detour
- * stopped and the mismatch became visible. Linking here at the RRAM
- * SBUS Secure alias 0x32011400 matches the bytes the script writes.
- */
-/* Flip back to SMIF0 placement: oem_app_address=0x18100000 makes
- * extended-boot power and XIP-configure SMIF0 before jumping to our
- * M33 image. That also leaves SMIF0 fully mapped for CM55 XIP from
- * m55_xip (without which CM55 double-faults seconds after release).
- * m33s_header at 0x60100000 for openocd flash write (NS alias for
- * SMIF0), m33s_xip linked at 0x18100400 (Secure Code alias). */
-&m33s_header { reg = <0x60100000 0x400>; };
-&m33s_xip    { reg = <0x18100400 DT_SIZE_K(2300)>; };
-/ { chosen { zephyr,flash = &m33s_xip; }; };
 
 &clk_hf12 {
 	source-path = <IFX_CLK_HF_IN_CLKPATH0>;
 	clock-div = <IFX_CLK_HF_DIVIDE_BY_16>;
 	status = "okay";
-};
-
-&uart2 {
-	current-speed = <460800>;
-};
-
-/*
- * Phase 0b.8: M33 side of the assistant ipc_service endpoint.
- * TX/RX channels swapped relative to the M55 overlay so icmsg matches
- * end-to-end. NVIC IRQ 1 = m33syscpuss_interrupts_ipc_dpslp_0_IRQn.
- */
-/ {
-	soc {
-		pse84_mbox: mbox@422a0000 {
-			compatible = "infineon,pse84-mbox";
-			reg = <0x422a0000 0x1000>;
-			interrupts = <1 3>;
-			channels-used = <10 9>;
-			intr-index = <0>;
-			#mbox-cells = <1>;
-			status = "okay";
-		};
-	};
-
-	reserved-memory {
-		#address-cells = <1>;
-		#size-cells = <1>;
-
-		ipc_rx: memory@240ff000 {
-			reg = <0x240ff000 0x1000>;
-		};
-		ipc_tx: memory@240fe000 {
-			reg = <0x240fe000 0x1000>;
-		};
-	};
-
-	ipc {
-		assistant_ipc0: assistant_ipc0 {
-			compatible = "zephyr,ipc-icmsg";
-			tx-region = <&ipc_tx>;
-			rx-region = <&ipc_rx>;
-			mboxes = <&pse84_mbox 1>, <&pse84_mbox 0>;
-			mbox-names = "rx", "tx";
-			status = "okay";
-		};
-	};
 };
