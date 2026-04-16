@@ -26,7 +26,6 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/ipc/ipc_service.h>
 #include <zephyr/sys/printk.h>
-
 LOG_MODULE_REGISTER(pse84_assistant_m33, LOG_LEVEL_INF);
 
 static void ep_recv(const void *data, size_t len, void *priv)
