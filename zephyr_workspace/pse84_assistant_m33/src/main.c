@@ -26,7 +26,21 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/ipc/ipc_service.h>
 #include <zephyr/sys/printk.h>
+
+#include "cy_ipc_pipe.h"
+#include "cy_ipc_sema.h"
+
 LOG_MODULE_REGISTER(pse84_assistant_m33, LOG_LEVEL_INF);
+
+/* M33 must initialise Cypress IPC pipe EP array before Zephyr's
+ * ipc_service driver (cy_ipc_sema + cy_ipc_drv) is usable —
+ * otherwise the first mbox/spinlock access asserts "Invalid
+ * spinlock" in z_spin_lock_valid. M55 does this in
+ * soc_pse84_m55.c:soc_early_init_hook, but there's no equivalent
+ * on the M33-Secure SOC path. Do it here before main() registers
+ * the ipc_service endpoint. */
+#define CY_IPC_MAX_ENDPOINTS (8UL)
+static cy_stc_ipc_pipe_ep_t systemIpcPipeEpArray[CY_IPC_MAX_ENDPOINTS];
 
 static void ep_recv(const void *data, size_t len, void *priv)
 {
@@ -60,6 +74,14 @@ static void ep_bound(void *priv)
 int main(void)
 {
 	printk("=== PSE84 M33 companion (Phase 0b.8 log sink) ===\n");
+
+	Cy_IPC_Pipe_Config(systemIpcPipeEpArray);
+	/* Initialise the IPC semaphore channel — needed so
+	 * cy_ipc_drv / cy_ipc_sema spinlocks and mbox IRQ handlers
+	 * validate. CM33_S has no cybsp to call _cybsp_global_sema_init,
+	 * so do the equivalent here (matches M55's
+	 * Cy_IPC_Sema_Init(IPC0_SEMA_CH_NUM, 0, NULL) in cybsp.c). */
+	(void)Cy_IPC_Sema_Init(IPC0_SEMA_CH_NUM, 0UL, NULL);
 
 	const struct device *ipc_dev =
 		DEVICE_DT_GET(DT_NODELABEL(assistant_ipc0));
