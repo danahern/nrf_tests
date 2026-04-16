@@ -539,3 +539,44 @@ Result (openocd halt + inspect after 4 s reset):
 **Baseline = good for v1 voice-assistant display/audio work.**
 Phase 4 BLE/WiFi still needs M33 running, but that's a separate
 investigation (project_pse84_m33_hardfault.md).
+
+### 2026-04-16 evening — REAL M33 hardfault root cause + BLE on M55
+
+After deeper RCA (see embedded/docs/pse84_m33_secure_uart_fault.md):
+
+**Root cause:** `cy_ppc_init` re-attributes ALL of PERI0 to NS, then
+M33-Secure side accesses to peripherals via Secure aliases bus-fault.
+- `0x529A0000` = SCB2 Secure alias (boot banner uart write)
+- `0x52xxxxxx` = MCWDT Secure alias (kernel tick source via INFINEON_LP_TIMER)
+- `0x52xxxxxx` = SCB4 Secure alias (would be HCI to CYW55513)
+- `0x52xxxxxx` = IPC Secure aliases (mbox/icmsg)
+
+The earlier RCA (M33_HARDFAULT_RCA.md / project_pse84_m33_hardfault.md
+memory) had VECTTBL fault; that was a DIFFERENT manifestation of the
+SAME issue (with SERIAL=n, idle path hit some other PERI0 peripheral
+indirectly via NVIC). `__disable_irq` fix landed in fae9ce777c6
+silenced THAT specific path but the underlying problem remained.
+
+**Fix applied (Option A from the RCA):** disable M33 console + drop
+`INFINEON_LP_TIMER_PDL` for `CORTEX_M_SYSTICK` (CPU-internal, not
+PPC-affected). M33 now runs main() loop cleanly with `k_yield()`
+(NOT `k_sleep` — that triggers a separate Zephyr timeout assertion
+on the kernel tick path). IPC bind still doesn't complete (icmsg
+handshake stalls), but the bind isn't strictly required for v1.
+
+**BLE pivot:** Instead of fighting M33 PERI0 access, moved BLE host
+to M55 NS (where peripheral access is clean). `kit_pse84_ai_m55.dts`
+already shows the pattern; reused. Result: M55 advertises as
+`PSE84-Assistant` over CYW55513 + uart4 HCI. ~18 s firmware download
+(115200 baud, can be raised). Phase 4 unblocked.
+
+**Net status (end of session 2026-04-16):**
+- ✅ Display animates (M55 LVGL on GFXSS)
+- ✅ Audio capture (PDM via DMIC, with FIFO overflow under BT load
+  — needs priority tuning)
+- ✅ BLE advertising (`PSE84-Assistant`, public addr 55:50:0A:1A:76:93)
+- ✅ M33 boots, runs main() loop, no fault
+- ⏳ M33 IPC bind — registered but never bound (workqueue/handshake)
+- ⏳ WiFi — config attempted, M55 DTCM overflow (need WHD-to-SOCMEM
+  link script change)
+- ⏳ L2CAP CoC handler (next phase 4 step)
