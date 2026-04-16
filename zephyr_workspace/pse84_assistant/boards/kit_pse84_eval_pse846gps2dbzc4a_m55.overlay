@@ -1,4 +1,5 @@
 #include <zephyr/dt-bindings/display/panel.h>
+#include <zephyr/dt-bindings/memory-attr/memory-attr-arm.h>
 #include "../../zephyrproject/zephyr/boards/infineon/kit_pse84_eval/kit_pse84_eval_octal_64mb.overlay"
 
 /*
@@ -284,11 +285,24 @@ dmic_dev: &dmic0 {
 		#address-cells = <1>;
 		#size-cells = <1>;
 
-		ipc_rx: memory@240fe000 {
-			reg = <0x240fe000 0x1000>;
+		/* ICMSG shared rings in the SOCMEM gap between m55_data
+		 * (ends 0x26140000) and socmem_fb (starts 0x26240000).
+		 * Previous placement at 0x240fe000/0x240ff000 collided
+		 * with the board's SHARED_MEMORY + m55_allocatable_shared
+		 * regions (cy_ipc_sema lives at 0x240fe000).
+		 *
+		 * Marked non-cacheable so both cores see handshake magic
+		 * writes without explicit cache ops. Without this, M55
+		 * (D-cache on) writes sit in its cache and M33 reads
+		 * stale zeros → icmsg bind never completes. (Tier-1 bug
+		 * B15 in the embedded review.) */
+		ipc_rx: memory@26140000 {
+			reg = <0x26140000 0x1000>;
+			zephyr,memory-attr = <( DT_MEM_ARM_MPU_RAM_NOCACHE )>;
 		};
-		ipc_tx: memory@240ff000 {
-			reg = <0x240ff000 0x1000>;
+		ipc_tx: memory@26141000 {
+			reg = <0x26141000 0x1000>;
+			zephyr,memory-attr = <( DT_MEM_ARM_MPU_RAM_NOCACHE )>;
 		};
 	};
 

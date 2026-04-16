@@ -12,6 +12,7 @@
  */
 
 #include <zephyr/dt-bindings/clock/ifx_clock_source_common.h>
+#include <zephyr/dt-bindings/memory-attr/memory-attr-arm.h>
 
 /*
  * Phase 0c — link M33 Secure into RRAM so extended-boot can actually
@@ -83,11 +84,18 @@
 		#address-cells = <1>;
 		#size-cells = <1>;
 
-		ipc_rx: memory@240ff000 {
-			reg = <0x240ff000 0x1000>;
+		/* ICMSG shared rings in SOCMEM gap (see M55 overlay for
+		 * rationale). M33's RX is the buffer M55 writes to =
+		 * M55's ipc_tx @ 0x26141000. M33's TX is the buffer
+		 * M55 reads from = M55's ipc_rx @ 0x26140000. Labels swap
+		 * roles between cores; addresses are fixed. */
+		ipc_rx: memory@26141000 {
+			reg = <0x26141000 0x1000>;
+			zephyr,memory-attr = <( DT_MEM_ARM_MPU_RAM_NOCACHE )>;
 		};
-		ipc_tx: memory@240fe000 {
-			reg = <0x240fe000 0x1000>;
+		ipc_tx: memory@26140000 {
+			reg = <0x26140000 0x1000>;
+			zephyr,memory-attr = <( DT_MEM_ARM_MPU_RAM_NOCACHE )>;
 		};
 	};
 
