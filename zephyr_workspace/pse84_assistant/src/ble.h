@@ -9,6 +9,13 @@
 #ifndef PSE84_ASSISTANT_BLE_H_
 #define PSE84_ASSISTANT_BLE_H_
 
+#include <zephyr/kernel.h>
+
 int ble_init(void);
+
+/* Block caller until bt_enable completed (or timeout). Returns 0 if
+ * BT came up within the timeout, -EAGAIN on timeout. When
+ * CONFIG_BT is disabled, returns 0 immediately (no-op). */
+int ble_wait_ready(k_timeout_t timeout);
 
 #endif

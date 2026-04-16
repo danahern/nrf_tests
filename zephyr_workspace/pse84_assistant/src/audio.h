@@ -45,9 +45,21 @@ extern "C" {
 #define AUDIO_BLOCK_BYTES       (AUDIO_BYTES_PER_MS * AUDIO_BLOCK_DURATION_MS)
 
 /* Initialise the DMIC device and configure it for 16 kHz mono s16.
+ * Spawns the capture worker thread but DOES NOT trigger the DMIC
+ * hardware — call audio_dmic_kickoff() after bt_enable has finished
+ * its firmware download spike (see src/ble.c:ble_wait_ready). Kicking
+ * the PDM DMA while uart4 is saturated with HCI firmware bytes
+ * starves the DMA completion IRQ and the PDM HW FIFO overflows.
  * Idempotent. Returns 0 on success, negative errno on failure.
  */
 int audio_init(void);
+
+/* Start the PDM hardware + DMA. Safe to call multiple times (becomes
+ * a no-op once started). Call after audio_init AND after the BT
+ * firmware download has completed — see src/ble.h for ble_wait_ready.
+ * Returns 0 on success, negative errno on failure.
+ */
+int audio_dmic_kickoff(void);
 
 /* Begin capture. Clears the ring buffer and arms the DMIC controller.
  * Safe to call while already capturing (becomes a no-op).

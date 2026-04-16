@@ -50,9 +50,17 @@ BT_CONN_CB_DEFINE(conn_callbacks) = {
 	.disconnected = disconnected_cb,
 };
 
-/* bt_enable can block for ~1–2 s while the CYW55513 firmware loads.
- * Run it on a dedicated thread so main() keeps ticking audio / UI and
- * we can watch progress via LOG_INF at every step. */
+/* Signalled once bt_enable returns (success or fail) so other
+ * subsystems can wait for BT's spike of uart4 IRQ load to finish
+ * before bringing up their own peripherals. Most notably the DMIC:
+ * PDM DMA completion IRQs get starved while uart4 is pumping
+ * firmware bytes at 115200, and the PDM HW FIFO overflows. */
+static K_EVENT_DEFINE(ble_ready_event);
+#define BLE_EVT_READY 0x1U
+
+/* bt_enable can block for ~18 s while the CYW55513 firmware loads
+ * over uart4 @ 115200. Run it on a dedicated thread so main() can
+ * kick off the rest of the system in parallel. */
 static void ble_thread_fn(void *a, void *b, void *c)
 {
 	ARG_UNUSED(a); ARG_UNUSED(b); ARG_UNUSED(c);
@@ -61,6 +69,7 @@ static void ble_thread_fn(void *a, void *b, void *c)
 	int err = bt_enable(NULL);
 	if (err) {
 		LOG_ERR("bt_enable failed: %d", err);
+		k_event_post(&ble_ready_event, BLE_EVT_READY);
 		return;
 	}
 	LOG_INF("bt_enable ok; starting advertising (name='%s')",
@@ -70,9 +79,18 @@ static void ble_thread_fn(void *a, void *b, void *c)
 			      ARRAY_SIZE(adv_data), NULL, 0);
 	if (err) {
 		LOG_ERR("adv start failed: %d", err);
+		k_event_post(&ble_ready_event, BLE_EVT_READY);
 		return;
 	}
 	LOG_INF("advertising as '%s'", CONFIG_BT_DEVICE_NAME);
+	k_event_post(&ble_ready_event, BLE_EVT_READY);
+}
+
+int ble_wait_ready(k_timeout_t timeout)
+{
+	uint32_t events = k_event_wait(&ble_ready_event, BLE_EVT_READY,
+				       false, timeout);
+	return (events & BLE_EVT_READY) ? 0 : -EAGAIN;
 }
 
 K_THREAD_STACK_DEFINE(ble_thread_stack, 4096);

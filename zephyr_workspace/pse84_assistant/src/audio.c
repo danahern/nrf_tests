@@ -128,11 +128,19 @@ static int audio_configure(void)
 	return 0;
 }
 
+static K_SEM_DEFINE(dmic_running_sem, 0, 1);
+
 static void audio_thread_fn(void *a, void *b, void *c)
 {
 	ARG_UNUSED(a);
 	ARG_UNUSED(b);
 	ARG_UNUSED(c);
+
+	/* Block until audio_dmic_kickoff posts the semaphore. Before
+	 * that point dmic_read would return -EIO (state != ACTIVE) and
+	 * we'd log hundreds of spurious errors during the BT fw
+	 * download window. */
+	k_sem_take(&dmic_running_sem, K_FOREVER);
 
 	/* DMIC runs continuously after audio_init() — see the comment on
 	 * audio_capture_start(). This thread pulls every block out of the
@@ -250,7 +258,26 @@ int audio_init(void)
 					  AUDIO_THREAD_PRIORITY, 0, K_NO_WAIT);
 	k_thread_name_set(audio_thread_id, "audio");
 
-	/* Start DMIC once and leave it running. The thread above drains
+	audio_configured = true;
+	LOG_INF("audio_init ok (dmic=%s, %d Hz mono s16, ring=%d bytes) — "
+		"waiting for audio_dmic_kickoff() to start PDM hardware",
+		dmic_dev->name, AUDIO_SAMPLE_RATE_HZ, (int)AUDIO_RING_BYTES);
+	return 0;
+}
+
+static bool dmic_running;
+
+int audio_dmic_kickoff(void)
+{
+	if (dmic_running) {
+		return 0;
+	}
+	if (!audio_configured) {
+		LOG_ERR("audio_dmic_kickoff called before audio_init");
+		return -EINVAL;
+	}
+
+	/* Start DMIC once and leave it running. The capture thread drains
 	 * every block forever; audio_capture_start/stop just gate which
 	 * blocks are copied into the ring. This keeps the PDM DC-blocker
 	 * warm so captures start from a settled baseline instead of the
@@ -258,16 +285,14 @@ int audio_init(void)
 	 * zephyr_workspace/pse84_dmic_test for the diagnostic that proved
 	 * the settling takes ~800 ms of silence per START.
 	 */
-	ret = dmic_trigger(dmic_dev, DMIC_TRIGGER_START);
+	int ret = dmic_trigger(dmic_dev, DMIC_TRIGGER_START);
 	if (ret < 0) {
 		LOG_ERR("DMIC_TRIGGER_START (warm-up) failed: %d", ret);
 		return ret;
 	}
-
-	audio_configured = true;
-	LOG_INF("audio_init ok (dmic=%s, %d Hz mono s16, ring=%d bytes) — "
-		"DC blocker warming up, give ~1 s before first capture",
-		dmic_dev->name, AUDIO_SAMPLE_RATE_HZ, (int)AUDIO_RING_BYTES);
+	dmic_running = true;
+	k_sem_give(&dmic_running_sem);
+	LOG_INF("audio_dmic_kickoff ok — DMA streaming started");
 	return 0;
 }
 
