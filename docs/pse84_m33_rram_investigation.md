@@ -288,6 +288,38 @@ range"). Arch ref §17.2.4.2.3 examples use `0x70100000` (SBUS Secure
 SMIF0), not CBUS. Changed to `oem_app_address: 0x70100000` and
 re-provisioned. That boots fine and extended-boot powers SMIF0.
 
+### 2026-04-15 late — display lit ✓
+
+**Fix:** flip `oem_alt_boot` back to `true` (was false). With P17.6
+pulled high on kit_pse84_eval, extended-boot takes the alt-boot
+path to `oem_alt_app_address=0x70100000` (set the same as
+`oem_app_address=0x70100000` so either path lands on our M33
+signed hex). The MPC state extended-boot leaves under alt_boot=true
+is the one Zephyr's `ifx_pse84_cm55_startup()` expects —
+`cy_mpc_init`/`cy_ppc_init` run cleanly instead of faulting on
+APPCPUSS rows.
+
+Also flipped `CONFIG_SOC_PSE84_M55_ENABLE=n` → `=y` in
+`pse84_assistant/sysbuild/enable_cm55.conf` so the full
+ifx_pse84_cm55_startup handles CM55 release. Deleted our hand-
+rolled `release_cm55()` + MPC surgery from `pse84_assistant_m33/
+src/main.c` — no longer needed.
+
+**Why alt_boot=false broke things even though we had the oem_app
+address right:** extended-boot's MPC setup differs by boot path.
+alt_boot=true leaves APPCPUSS MPC configured for the already-
+attributed layout Zephyr expects to re-write; alt_boot=false
+locks those rows so `Cy_Mpc_ConfigRotMpcStruct` faults.
+
+**Still TODO:**
+- Post-flip, M33 uart output is silent past the Zephyr boot banner.
+  Could be a side-effect of ifx_pse84_cm55_startup's `__disable_irq`
+  (serial backend interrupt-driven) — verify and route M33 logs
+  to polled mode if needed.
+- Display lights but "not animating" per user observation. M55 may
+  be faulting after GFXSS init — look for the M55 log stream via
+  the ipc tunnel once M33 side is producing output.
+
 ### End-of-session status (2026-04-15 evening)
 
 **Working:**
