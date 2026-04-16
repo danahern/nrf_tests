@@ -394,3 +394,148 @@ Disabled CONFIG_INFINEON_SMIF_PSRAM on the M33 companion for now to
 keep the CM55 release path lean — the voice-assistant bring-up
 doesn't need HyperRAM yet; can re-enable once everything else is
 running.
+
+---
+
+## Session continuation (2026-04-16) — SOC hook split for IPC tunnel
+
+**Context recap:** previous session ended with M55 voice assistant
+animating cleanly (after `CONFIG_SOC_PSE84_M55_ENABLE=y` fix +
+polled UART + sync log + sprite bundle disabled) but M33 silenced
+back down to GPIO/PINCTRL/CLOCK_CONTROL only — every attempt to
+re-enable SERIAL or MBOX bus-faulted M33 because driver probes at
+PRE_KERNEL_1 / POST_KERNEL touch SCB2 / pse84_mbox **before**
+`soc_late_init_hook` → `ifx_pse84_cm55_startup` runs PPC
+re-attribution.
+
+### Why "bump drivers to APPLICATION level" didn't work
+
+First attempt: edit `drivers/serial/uart_infineon_pdl.c` and
+`drivers/mbox/mbox_pse84.c` to use APPLICATION init level. Result:
+compile errors in Zephyr's `DEVICE_DT_INST_DEFINE` macro chain —
+`ZERO_OR_COMPILE_ERROR` rejects APPLICATION for device-class
+drivers (Zephyr design choice; see `include/zephyr/init.h`).
+
+### Working fix: split the SOC hook into early + late phases
+
+`soc/infineon/edge/pse84/security_config/pse84_boot.c`:
+- New `ifx_pse84_cm55_early_init()` — runs from `soc_early_init_hook`,
+  BEFORE driver probes. Does SAU + SCB/NVIC/FPU + PD1 + peri groups +
+  SOCMEM + `cy_mpc_init` + `cy_pd_pdcm_clear_dependency` + `cy_ppc0_init`
+  + `cy_ppc1_init`. Removed the `__disable_irq` dance around `cy_ppc_init`
+  — not needed in early phase because M55 isn't released yet.
+- `ifx_pse84_cm55_startup()` — now ONLY does `ifx_pse84_psram_init` (if
+  PSRAM) + `Cy_SysEnableCM55` + `Cy_SysPm_SetSOCMEMDeepSleepMode`. Runs
+  from `soc_late_init_hook` after all driver probes complete.
+
+`soc/infineon/edge/pse84/soc_pse84_m33_s.c`:
+- `soc_early_init_hook` calls `ifx_pse84_cm55_early_init()` after
+  `SystemInit()` (gated on `CONFIG_SOC_PSE84_M55_ENABLE`).
+- `soc_late_init_hook` retains `ifx_pse84_cm55_startup()` call.
+
+`soc/infineon/edge/pse84/security_config/pse84_boot.h`:
+- Added `void ifx_pse84_cm55_early_init(void);` declaration.
+
+### M33 companion re-enabled
+
+`zephyr_workspace/pse84_assistant_m33/prj.conf`:
+- Added `CONFIG_SERIAL=y CONFIG_CONSOLE=y CONFIG_UART_CONSOLE=y
+  CONFIG_PRINTK=y` — uart now safe because PPC attribution happened
+  in early-init.
+- Added `CONFIG_MBOX=y CONFIG_IPC_SERVICE=y
+  CONFIG_IPC_SERVICE_BACKEND_ICMSG=y` — IPC tunnel back online.
+
+`zephyr_workspace/pse84_assistant_m33/src/main.c`:
+- Restored full `ipc_service_open_instance` + `register_endpoint` flow
+  for the `assistant` endpoint on `assistant_ipc0` mailbox node.
+- `ep_recv` callback prefixes every received line with `[m55] ` and
+  emits to printk (uart2). Tracks `at_line_start` across receives.
+- 5 s heartbeat keeps a liveness signal on the wire.
+
+### Trade-off
+
+Zephyr boot-banner ("\*\*\* Booting Zephyr OS build … \*\*\*") happens
+during PRE_KERNEL_2, before APPLICATION-level work. Even though the
+uart driver itself is now safe, the banner uses cbprintf which goes
+through console_init that still races early. Banner may not appear —
+but `printk` from `main()` does, so M33's `=== PSE84 M33 companion ===`
+line is the practical "boot proof".
+
+### Next verification
+
+Flash M55 + M33 (sysbuild outputs both), capture serial. Looking for:
+1. `=== PSE84 M33 companion ===` — proves M33 main runs after
+   driver attribution.
+2. `[m33] ipc 'assistant' endpoint registered` — proves MBOX driver
+   probe succeeded.
+3. M55 LVGL animation visible on display — proves
+   `soc_late_init_hook` → `Cy_SysEnableCM55` still releases M55
+   correctly with `cy_ppc_init` moved earlier.
+4. `[m33] ipc 'assistant' endpoint bound — log tunnel live` —
+   proves M55 peer endpoint bound back.
+5. `[m55] …` lines on uart — proves end-to-end log tunnel.
+
+If M33 still silent → likely some driver still probes
+pre-attribution; check Zephyr boot ordering for `MBOX_INIT_PRIORITY`
+default vs the time `soc_early_init_hook` runs.
+
+If M55 doesn't animate → moving `cy_ppc_init` earlier broke a
+post-handoff invariant; back out of early-init and re-test with
+attribution moved into late-init only (M33 silent again).
+
+### 2026-04-16 SOC hook split result: M33 BusFault
+
+**Flashed + reset with SOC hook split in place + M33 SERIAL/MBOX re-enabled.**
+
+Result:
+- Extended-boot: OK, launches M33 from SMIF0.
+- M33 PC after 3 s: `0x1810f240` = `arch_system_halt` (Zephyr panic).
+- MSP = `0x34038cb8`, mode = Handler BusFault, xPSR IPSR=5.
+- Stack frame shows: `bus_fault` → `z_arm_fault` → `z_fatal_error` → `arch_system_halt`.
+- CFSR = 0, BFAR = `0x34038cbc` (just past stack pointer — likely precise
+  fault on some MPC-region struct access).
+- Stack contains `0x18110134` which points INTO `m33_m55_mpc_regions`
+  rodata — suggesting cy_mpc_init / cy_ppc_init struct iteration.
+- `0x34000000 = 0xa0000003` (NOT `0xAA000003` = LAUNCH_NEXT_APP) —
+  indicates M33 overwrote the boot status word with own SRAM data,
+  which means M33 DID get past extended-boot.
+- CM55 stuck at `0x3ff01` (CPU_WAIT) — M33 didn't reach
+  `Cy_SysEnableCM55` in late-init before panic.
+
+**Verdict:** Moving cy_mpc_init + cy_ppc_init to early-init phase
+bus-faults somewhere in the MPC/PPC region walk. Likely causes:
+- Some memory region the MPC config touches isn't powered on at
+  early-init timing (POST_KERNEL is later, more things set up).
+- IRQ state at early-init differs from late-init (we run with IRQs
+  enabled; baseline disabled them before cy_ppc_init). Stale IRQ
+  vector fetch during re-attribution?
+
+**Decision:** revert SOC hook split. Accept the Phase 0b.1 constraint
+(M33 minimal silent, no SERIAL/MBOX). Display animates from M55, and
+v1 does not require M33 logs. Later solutions to investigate:
+1. Fix the M33 post-handoff hardfault (cmt fae9ce777c6 added
+   `__disable_irq` around cy_ppc_init but fault still occurs —
+   needs deeper RCA per `project_pse84_m33_hardfault.md` memory).
+   Once M33 runs main() cleanly, the IPC tunnel can light up.
+2. Route M55 logs OUT via bridge.py directly over L2CAP once BLE
+   is up (Phase 4 goal). Skip the M33 relay entirely.
+
+### 2026-04-16 — baseline restored + verified animating
+
+Flashed with:
+- `pse84_boot.c` / `pse84_boot.h` / `soc_pse84_m33_s.c` clean (no split)
+- `pse84_assistant_m33/prj.conf` = minimal silent (GPIO/PINCTRL/CLOCK_CONTROL only)
+- `pse84_assistant_m33/src/main.c` = empty forever-idle main()
+
+Result (openocd halt + inspect after 4 s reset):
+- CM55: PC=`0x60546fa4` (in M55 image SMIF0 range), Thread mode — LVGL
+  animation running. User confirmed "display animates".
+- CM33: HardFault after double-fault ("clearing lockup after double fault"
+  from openocd, PC=`0xeffffffe` = EXC_RETURN). Matches known-good
+  per `project_pse84_m33_hardfault.md` memory — M33 hardfaults post-
+  handoff, but CM55 already has control and display still works.
+- Halting CM55 via openocd freezes animation (expected).
+
+**Baseline = good for v1 voice-assistant display/audio work.**
+Phase 4 BLE/WiFi still needs M33 running, but that's a separate
+investigation (project_pse84_m33_hardfault.md).
