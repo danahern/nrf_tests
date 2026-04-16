@@ -360,16 +360,85 @@ with `-c 'init' -c 'reset run' -c 'shutdown'` then open serial.
 
 ---
 
-## 13. Phase 4 unblock criteria
+## 13. Phase 4 BLE — DONE (2026-04-16)
 
-Before BLE/WiFi work (Phase 4) is unblocked:
-- [ ] M33 prints `=== PSE84 M33 companion ===` on uart2
-- [ ] M33 logs `[m33] ipc 'assistant' endpoint registered`
-- [ ] Display animates (LVGL)
-- [ ] M33 logs `[m33] ipc 'assistant' endpoint bound — log tunnel live`
-- [ ] M55 LOG_INF lines appear on uart2 prefixed with `[m55] `
-- [ ] M33 heartbeat ticks every 5 s
+**BLE on M55, not M33.** The original master plan put BLE host on M33,
+but the SCB4 (uart4 = HCI to CYW55513) faults the same way SCB2 does
+when accessed from M33-Secure post-`cy_ppc_init`. The cleanest unblock
+was to put BLE on M55 NS (where there's no PPC issue).
 
-Once green: cross-reference Infineon mtw examples at
-`/Users/danahern/mtw/PSOC_Edge_Wi-Fi_Onboarding_Using_Bluetooth_LE/`
-and `mtb-training-psoc-edge-e84-features` for HCI/CYW55513 setup.
+`kit_pse84_ai_m55.dts` (the AI variant) already shows the pattern —
+same hardware (CYW55513, uart4 HCI, GPIO11.0 reg-on), BT on M55. We
+mirror that in `pse84_assistant`'s board overlay (already present at
+lines 340-360 of the M55 overlay) plus add the M55 prj.conf knobs:
+
+```
+CONFIG_BT=y
+CONFIG_BT_PERIPHERAL=y
+CONFIG_BT_DEVICE_NAME="PSE84-Assistant"
+CONFIG_BT_L2CAP_DYNAMIC_CHANNEL=y
+CONFIG_BT_HCI_ACL_FLOW_CONTROL=n
+CONFIG_BT_AIROC=y
+CONFIG_CYW55500=y
+CONFIG_CYW55513IUBG_SM=y
+```
+
+BT firmware blob is fetched at:
+```
+modules/hal/infineon/zephyr/blobs/img/bluetooth/firmware/COMPONENT_CYW55513/COMPONENT_BTFW/bt_firmware.hcd
+```
+
+Firmware downloads over HCI uart at 115200 → ~18 s startup. Bumping
+`fw-download-speed` in DT (cyw55513 node) to 3000000 should drop this
+to <2 s; not yet tried.
+
+**Verified output (post-fw-load):**
+```
+bt_hci_core: HCI transport: H:4
+bt_hci_core: Identity: 55:50:0A:1A:76:93 (public)
+bt_hci_core: HCI: version 6.0 (0x0e) revision 0x1000, manufacturer 0x0009
+bt_hci_core: LMP: version 6.0 (0x0e) subver 0x2220
+ble: bt_enable ok; starting advertising (name='PSE84-Assistant')
+ble: advertising as 'PSE84-Assistant'
+```
+
+**Pitfall observed:** `ble_init()` was called twice in `main.c` (once
+before the IPC block, once after). Second call re-runs `k_thread_create`
+on a non-idle thread → `bt_enable`'s internal timer setup hits
+`__ASSERT(!sys_dnode_is_linked(&to->node))` in `kernel/timeout.c:100`.
+Fix: call `ble_init()` once.
+
+**Phase 4 still TODO:**
+- L2CAP CoC handler (LE_PSM 0x0080, 247 B MTU per master plan)
+- `|type|seq|len|payload|` framing matching `bridge.py`
+- Audio path: PDM → Opus → L2CAP. With BLE on M55, all of this
+  runs on the same core. CPU budget verification needed —
+  current dmic_read errors with FIFO overflow suggest BT thread
+  starves audio. Likely fixes:
+  - Bump audio thread priority above ble_thread (currently
+    ble at K_PRIO_PREEMPT(7))
+  - Defer Opus encode (do it on demand via DMIC ring buffer)
+
+**M33 still silent:** companion just calls `ifx_pse84_cm55_startup`
+(boots M55 + does PSRAM/octal SMIF config) and idles. No IPC tunnel
+yet. With BLE on M55, IPC isn't blocking for v1.
+
+## 14. WiFi (stretch — same chip)
+
+CYW55513 is dual-mode (BLE + WiFi). WiFi runs over SDHC0 (SDIO).
+Board DT already has the `airoc-wifi` node:
+```
+sdhc0 {
+    airoc-wifi {
+        compatible = "infineon,airoc-wifi";
+        wifi-reg-on-gpios = <&gpio_prt11 6 GPIO_ACTIVE_HIGH>;
+        wifi-host-wake-gpios = <&gpio_prt11 4 GPIO_ACTIVE_HIGH>;
+    };
+};
+```
+
+Need:
+- `CONFIG_WIFI=y CONFIG_WIFI_AIROC=y CONFIG_AIROC_WIFI_CYW55513=y`
+- WHD firmware blob (already fetched: `img/whd/resources/firmware/COMPONENT_55500/COMPONENT_SM/55500A1.trxcse`)
+- CLM blob (`img/whd/resources/clm/COMPONENT_55500/COMPONENT_CYW55513IUBG/55500A1.clm_blob`)
+- Network config (NETWORKING=y, NET_IPV4=y, etc.)
