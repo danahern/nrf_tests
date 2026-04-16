@@ -267,6 +267,29 @@ int audio_init(void)
 
 static bool dmic_running;
 
+#include "ble.h"
+
+#define AUDIO_KICKOFF_THREAD_STACK_SIZE 1024
+#define AUDIO_KICKOFF_THREAD_PRIORITY   10
+static K_THREAD_STACK_DEFINE(audio_kickoff_stack, AUDIO_KICKOFF_THREAD_STACK_SIZE);
+static struct k_thread audio_kickoff_thread_data;
+
+static void audio_kickoff_fn(void *a, void *b, void *c)
+{
+	ARG_UNUSED(a); ARG_UNUSED(b); ARG_UNUSED(c);
+	(void)ble_wait_ready(K_FOREVER);
+	(void)audio_dmic_kickoff();
+}
+
+void audio_kickoff_thread_start(void)
+{
+	k_thread_create(&audio_kickoff_thread_data, audio_kickoff_stack,
+			K_THREAD_STACK_SIZEOF(audio_kickoff_stack),
+			audio_kickoff_fn, NULL, NULL, NULL,
+			AUDIO_KICKOFF_THREAD_PRIORITY, 0, K_NO_WAIT);
+	k_thread_name_set(&audio_kickoff_thread_data, "audio_kickoff");
+}
+
 int audio_dmic_kickoff(void)
 {
 	if (dmic_running) {

@@ -254,19 +254,6 @@ int main(void)
 		LOG_ERR("ble_init failed; Phase 4 BLE disabled");
 	}
 
-#if defined(CONFIG_BT) && defined(CONFIG_AUDIO_DMIC)
-	/* Wait for bt_enable to finish pumping CYW55513 firmware over
-	 * uart4 (~18-40 s @ 115200 depending on chip state). Then kick
-	 * the PDM hardware. Without this gate, audio_init's
-	 * dmic_trigger(START) lands while uart4 is saturated with HCI
-	 * fw bytes; the PDM DMA completion IRQ is starved and the PDM
-	 * HW FIFO overflows within ~1.6 s of boot. We block K_FOREVER
-	 * because kicking DMIC before BT settles is strictly worse than
-	 * no audio. */
-	(void)ble_wait_ready(K_FOREVER);
-	(void)audio_dmic_kickoff();
-#endif
-
 	/* First flush before unblanking to avoid a frame of garbage. */
 	ui_tick();
 	ret = display_blanking_off(display);
@@ -274,6 +261,16 @@ int main(void)
 		LOG_ERR("display_blanking_off failed: %d", ret);
 		return ret;
 	}
+
+#if defined(CONFIG_BT) && defined(CONFIG_AUDIO_DMIC)
+	/* DMIC kickoff is done from a dedicated thread so the LVGL
+	 * render loop below can start immediately. Without this, a
+	 * blocking ble_wait_ready in main would freeze the display on
+	 * its first frame until BT firmware download finished (or
+	 * forever if BT hangs in the uart4 IRQ storm). */
+	extern void audio_kickoff_thread_start(void);
+	audio_kickoff_thread_start();
+#endif
 
 #ifdef CONFIG_APP_SNAPSHOT
 	/* Snapshot capture path: force each of the four states in turn,
