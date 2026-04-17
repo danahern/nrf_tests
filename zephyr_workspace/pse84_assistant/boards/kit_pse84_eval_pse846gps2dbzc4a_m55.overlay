@@ -304,6 +304,17 @@ dmic_dev: &dmic0 {
 			reg = <0x26141000 0x1000>;
 			zephyr,memory-attr = <( DT_MEM_ARM_MPU_RAM_NOCACHE )>;
 		};
+
+		/* 256 KB heap in SOCMEM. All malloc/calloc/realloc/free
+		 * calls (libopus + anyone else using libc malloc) route
+		 * here via the app_heap symbol overrides in app_heap.c.
+		 * This keeps DTCM free for thread stacks + Zephyr
+		 * internals. */
+		socmem_heap: memory@26200000 {
+			compatible = "zephyr,memory-region", "mmio-sram";
+			reg = <0x26200000 DT_SIZE_K(256)>;
+			zephyr,memory-region = "SOCMEM_HEAP";
+		};
 	};
 
 	/* `ipc0` label is reserved by the PSE84 SoC DTSI for the IPC0
