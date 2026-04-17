@@ -89,8 +89,10 @@ static uint8_t opus_out_seq;
  * the thread on start/stop so it isn't spinning when idle.
  */
 /* 2 KB was enough for the PCM-only path; libopus encoder needs
- * ~3-4 KB of stack per encode call. 4 KB is the sweet spot. */
-#define AUDIO_THREAD_STACK_SIZE 4096
+ * ~3–4 KB of stack per encode call, and can preempt-overflow at 4 KB when
+ * BT ISRs land mid-encode. 8 KB is comfortable now that m55_data grew
+ * to 1.25 MB (see the overlay's &m55_data reg override). */
+#define AUDIO_THREAD_STACK_SIZE 8192
 #define AUDIO_THREAD_PRIORITY   5
 
 static K_SEM_DEFINE(audio_capture_sem, 0, 1);

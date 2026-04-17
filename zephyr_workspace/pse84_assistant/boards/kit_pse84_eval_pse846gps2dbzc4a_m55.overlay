@@ -13,6 +13,34 @@
 	reg = <0x60500000 DT_SIZE_M(40)>;
 };
 
+/*
+ * Grow primary SRAM (m55_data → chosen zephyr,sram in kit_pse84_eval_m55.dts)
+ * from the stock 256 KB to 2 MB — an 8x bump. The PSE84 has 5 MB of SOCMEM
+ * at 0x26000000 (see pse84.dtsi socmem node); the board map only carves
+ * out ~3.25 MB, leaving plenty of slack. This extends m55_data to consume
+ * 0x26100000..0x26300000 contiguously, and shifts socmem_fb + socmem_audio
+ * up the SOCMEM aperture accordingly (see reserved-memory overrides below).
+ *
+ * Motivation: LVGL pool + BT host buffers + libopus encoder (~15 KB) +
+ * audio thread stack (needs ~8 KB for libopus encode call path) didn't
+ * fit in the stock 256 KB — audio thread stack-overflowed mid-Opus-encode
+ * once a BT peer connected. A wholesale 8x bump eliminates the need to
+ * micro-manage individual buffer placements and leaves room to grow.
+ */
+&m55_data {
+	reg = <0x26100000 DT_SIZE_M(2)>;
+};
+
+/*
+ * socmem_fb lived at 0x26240000 in the base memory map; push it to
+ * 0x26300000 so the newly-grown m55_data sits contiguously ahead of it.
+ * The GFXSS driver references the framebuffer by DT phandle, not by
+ * fixed address, so this relocation is transparent at runtime.
+ */
+&socmem_fb {
+	reg = <0x26300000 DT_SIZE_K(1024)>;
+};
+
 /* I2C on SCB0 — used by the Waveshare 4.3" panel MCU at 0x45 */
 &p8_0_scb0_i2c_scl {
 	drive-open-drain;
@@ -70,25 +98,28 @@ i2c0: &scb0 {
 	};
 
 	/*
-	 * Phase 1b: 1 MiB scratch region in SOCMEM for the sprite playback
-	 * framebuffer (800*480*2 = 768000 bytes for tier A). Placed at the
-	 * 1 MiB aligned slot immediately following socmem_fb (0x26240000 +
-	 * 0x100000 = 0x26340000). The M55 linker does not own SOCMEM, so
-	 * we point a Zephyr memory-region at it and use DT_REG_ADDR() from
-	 * src/sprites.c to place the static scratch buffer via
-	 * Z_GENERIC_SECTION.
+	 * Post-grow SOCMEM layout (5 MB total at 0x26000000, 1 MB leading
+	 * slack at 0x26000000..0x26100000 left unclaimed — may be PPC-attributed
+	 * elsewhere, not worth the risk to probe):
+	 *
+	 *   0x26100000..0x26300000  m55_data      2 MB  (primary SRAM, grown)
+	 *   0x26300000..0x26400000  socmem_fb     1 MB  (LVGL framebuffer, moved)
+	 *   0x26400000..0x26401000  ipc_rx        4 KB
+	 *   0x26401000..0x26402000  ipc_tx        4 KB
+	 *   0x26410000..0x26420000  socmem_audio  64 KB (PCM ring, moved)
+	 *   0x26420000..0x26500000  unclaimed     ~896 KB future slack
+	 *
+	 * socmem_sprite is deleted — sprite playback is disabled
+	 * (CONFIG_APP_ANIMATION_SPRITES=n) and the region was no longer
+	 * needed for the ipc rings once m55_data absorbed that address space.
 	 */
 	reserved-memory {
-		socmem_sprite: memory@26340000 {
+		/* Phase 4: PCM ring in SOCMEM so the BT host has the primary
+		 * SRAM. Relocated to 0x26410000 to clear room for the grown
+		 * m55_data + shifted socmem_fb above. */
+		socmem_audio: memory@26410000 {
 			compatible = "zephyr,memory-region", "mmio-sram";
-			reg = <0x26340000 DT_SIZE_K(1024)>;
-			zephyr,memory-region = "SOCMEM_SPRITE";
-		};
-
-		/* Phase 4: 64 KiB PCM ring in SOCMEM so the BT host has SRAM. */
-		socmem_audio: memory@26440000 {
-			compatible = "zephyr,memory-region", "mmio-sram";
-			reg = <0x26440000 DT_SIZE_K(64)>;
+			reg = <0x26410000 DT_SIZE_K(64)>;
 			zephyr,memory-region = "SOCMEM_AUDIO";
 		};
 	};
@@ -285,35 +316,19 @@ dmic_dev: &dmic0 {
 		#address-cells = <1>;
 		#size-cells = <1>;
 
-		/* ICMSG shared rings in the SOCMEM gap between m55_data
-		 * (ends 0x26140000) and socmem_fb (starts 0x26240000).
-		 * Previous placement at 0x240fe000/0x240ff000 collided
-		 * with the board's SHARED_MEMORY + m55_allocatable_shared
-		 * regions (cy_ipc_sema lives at 0x240fe000).
-		 *
+		/* ICMSG shared rings at the top of the SOCMEM-fb block.
 		 * Marked non-cacheable so both cores see handshake magic
 		 * writes without explicit cache ops. Without this, M55
 		 * (D-cache on) writes sit in its cache and M33 reads
 		 * stale zeros → icmsg bind never completes. (Tier-1 bug
 		 * B15 in the embedded review.) */
-		ipc_rx: memory@26140000 {
-			reg = <0x26140000 0x1000>;
+		ipc_rx: memory@26400000 {
+			reg = <0x26400000 0x1000>;
 			zephyr,memory-attr = <( DT_MEM_ARM_MPU_RAM_NOCACHE )>;
 		};
-		ipc_tx: memory@26141000 {
-			reg = <0x26141000 0x1000>;
+		ipc_tx: memory@26401000 {
+			reg = <0x26401000 0x1000>;
 			zephyr,memory-attr = <( DT_MEM_ARM_MPU_RAM_NOCACHE )>;
-		};
-
-		/* 256 KB heap in SOCMEM. All malloc/calloc/realloc/free
-		 * calls (libopus + anyone else using libc malloc) route
-		 * here via the app_heap symbol overrides in app_heap.c.
-		 * This keeps DTCM free for thread stacks + Zephyr
-		 * internals. */
-		socmem_heap: memory@26200000 {
-			compatible = "zephyr,memory-region", "mmio-sram";
-			reg = <0x26200000 DT_SIZE_K(256)>;
-			zephyr,memory-region = "SOCMEM_HEAP";
 		};
 	};
 
