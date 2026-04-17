@@ -16,7 +16,7 @@ target_sources(app PRIVATE
     src/audio.c
     src/link.c
     src/ble.c
-    src/l2cap.c
+    src/gatt_svc.c
 )
 # log_tunnel.c depends on CONFIG_IPC_SERVICE. Skip it for the
 # minimal-M33-companion bring-up test where IPC isn't wired.

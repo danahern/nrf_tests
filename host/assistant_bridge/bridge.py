@@ -202,14 +202,13 @@ async def _run_file_inject(args: argparse.Namespace) -> int:
 
 
 async def _run_bleak(args: argparse.Namespace) -> int:
-    """Real BLE CoC transport via PyObjC CoreBluetooth L2CAP.
+    """BLE GATT transport via bleak.
 
-    Scans for PSE84-Assistant, connects, opens L2CAP on PSM 0x0080,
-    pumps frames through the pipeline (Opus decode → Whisper → Ollama →
-    TEXT_CHUNK/TEXT_END back to device).
+    Scans for PSE84-Assistant, connects, subscribes to the TX notify
+    characteristic, writes to the RX characteristic. Frames go through
+    the pipeline (Opus decode → Whisper → Ollama → TEXT_CHUNK back).
     """
     from .ble_transport import BLETransport
-    from .framing import FrameType, encode_frame
 
     opus, transcriber, llm = _build_codecs(args)
     cfg = PipelineConfig(
@@ -219,7 +218,6 @@ async def _run_bleak(args: argparse.Namespace) -> int:
         dry_run_llm=args.dry_run_llm,
     )
 
-    loop = asyncio.get_event_loop()
     outbound_q: asyncio.Queue[bytes] = asyncio.Queue()
 
     async def on_outbound(raw: bytes):
@@ -234,46 +232,37 @@ async def _run_bleak(args: argparse.Namespace) -> int:
     )
 
     def on_frame(frame):
-        """Called from the BLE NSRunLoop thread for each inbound frame."""
-        asyncio.run_coroutine_threadsafe(
-            pipeline.on_frame(frame), loop
+        """Called from bleak's notification callback for each frame."""
+        asyncio.get_event_loop().call_soon_threadsafe(
+            lambda: asyncio.ensure_future(pipeline.on_frame(frame))
         )
 
     target = args.bleak_address or "PSE84-Assistant"
-    transport = BLETransport(
-        target_name=target,
-        psm=0x0080,
-        on_frame=on_frame,
-    )
+    transport = BLETransport(target_name=target, on_frame=on_frame)
 
-    print(f"Scanning for '{target}'…", file=sys.stderr)
-    transport.start()
-
-    if not transport.wait_connected(timeout=30):
-        print("Timed out waiting for BLE connection", file=sys.stderr)
-        transport.stop()
+    try:
+        await transport.connect(timeout=30)
+    except RuntimeError as e:
+        print(f"BLE: {e}", file=sys.stderr)
         return 1
 
-    print("L2CAP connected — pipeline live", file=sys.stderr)
+    print("GATT connected — pipeline live", file=sys.stderr)
 
-    # TX pump: drain outbound_q and send to device
     async def tx_pump():
-        while True:
+        while transport.is_connected:
             raw = await outbound_q.get()
-            transport.send(raw)
+            await transport.send(raw)
 
     tx_task = asyncio.ensure_future(tx_pump())
 
     try:
-        # Keep running until disconnect or Ctrl-C
         while transport.is_connected:
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.5)
     except KeyboardInterrupt:
         pass
     finally:
         tx_task.cancel()
-        transport.stop()
-        print("BLE transport stopped", file=sys.stderr)
+        await transport.disconnect()
 
     return 0
 
