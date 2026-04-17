@@ -202,19 +202,14 @@ async def _run_file_inject(args: argparse.Namespace) -> int:
 
 
 async def _run_bleak(args: argparse.Namespace) -> int:
-    """Real BLE CoC transport. Intentionally minimal — hardware-bring-up
-    details land when Phase 4 boards come up. This wires the common
-    pipeline to a bleak L2CAP client so the framing + Opus + LLM path is
-    exercised end-to-end without code-path drift between transports."""
-    try:
-        from bleak import BleakClient, BleakScanner  # type: ignore
-    except Exception as e:  # pragma: no cover — bleak present in env
-        print(f"bleak import failed: {e}", file=sys.stderr)
-        return 2
+    """Real BLE CoC transport via PyObjC CoreBluetooth L2CAP.
 
-    if not args.bleak_address:
-        print("--transport=bleak requires --bleak-address=<addr>", file=sys.stderr)
-        return 2
+    Scans for PSE84-Assistant, connects, opens L2CAP on PSM 0x0080,
+    pumps frames through the pipeline (Opus decode → Whisper → Ollama →
+    TEXT_CHUNK/TEXT_END back to device).
+    """
+    from .ble_transport import BLETransport
+    from .framing import FrameType, encode_frame
 
     opus, transcriber, llm = _build_codecs(args)
     cfg = PipelineConfig(
@@ -224,6 +219,7 @@ async def _run_bleak(args: argparse.Namespace) -> int:
         dry_run_llm=args.dry_run_llm,
     )
 
+    loop = asyncio.get_event_loop()
     outbound_q: asyncio.Queue[bytes] = asyncio.Queue()
 
     async def on_outbound(raw: bytes):
@@ -236,20 +232,50 @@ async def _run_bleak(args: argparse.Namespace) -> int:
         llm=llm,
         on_outbound=on_outbound,
     )
-    parser = StreamingFrameParser()
 
-    # NOTE: bleak's public API does not ship a portable L2CAP CoC client on
-    # every platform. On macOS CoreBluetooth exposes L2CAP channels via
-    # `CBPeripheral.openL2CAPChannel(_:)`, which is surfaced through PyObjC.
-    # Finalizing this transport needs hardware to validate the exact byte
-    # stream — we scaffold the control flow here so wiring it up is a
-    # one-file change once the PSE84 side advertises.
-    print(
-        "bleak transport not finalized — requires hardware to validate. "
-        "See README for the macOS PyObjC openL2CAPChannel path.",
-        file=sys.stderr,
+    def on_frame(frame):
+        """Called from the BLE NSRunLoop thread for each inbound frame."""
+        asyncio.run_coroutine_threadsafe(
+            pipeline.on_frame(frame), loop
+        )
+
+    target = args.bleak_address or "PSE84-Assistant"
+    transport = BLETransport(
+        target_name=target,
+        psm=0x0080,
+        on_frame=on_frame,
     )
-    return 3
+
+    print(f"Scanning for '{target}'…", file=sys.stderr)
+    transport.start()
+
+    if not transport.wait_connected(timeout=30):
+        print("Timed out waiting for BLE connection", file=sys.stderr)
+        transport.stop()
+        return 1
+
+    print("L2CAP connected — pipeline live", file=sys.stderr)
+
+    # TX pump: drain outbound_q and send to device
+    async def tx_pump():
+        while True:
+            raw = await outbound_q.get()
+            transport.send(raw)
+
+    tx_task = asyncio.ensure_future(tx_pump())
+
+    try:
+        # Keep running until disconnect or Ctrl-C
+        while transport.is_connected:
+            await asyncio.sleep(0.1)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        tx_task.cancel()
+        transport.stop()
+        print("BLE transport stopped", file=sys.stderr)
+
+    return 0
 
 
 def _resolve_uart_port(args: argparse.Namespace) -> Optional[str]:
