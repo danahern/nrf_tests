@@ -23,4 +23,9 @@ int link_init(void);
  */
 void link_cancel_idle_revert(void);
 
+/* Schedule the 5 s RESPONDING→IDLE transition. Non-UART transports
+ * (GATT, L2CAP) call this on TEXT_END so the reply stays on screen
+ * instead of flashing for a frame and disappearing. */
+void link_schedule_idle_revert(void);
+
 #endif /* PSE84_ASSISTANT_LINK_H_ */

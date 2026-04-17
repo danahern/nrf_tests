@@ -71,6 +71,11 @@ void link_cancel_idle_revert(void)
 	k_work_cancel_delayable(&link_idle_revert);
 }
 
+void link_schedule_idle_revert(void)
+{
+	k_work_schedule(&link_idle_revert, K_MSEC(RESPONDING_HOLD_MS));
+}
+
 static size_t ring_count(void)
 {
 	int h = atomic_get(&link_ring_head);

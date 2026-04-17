@@ -252,6 +252,33 @@ static void build_responding_group(lv_obj_t *parent)
 static char ui_reply_buf[UI_REPLY_BUF_CAP + 1];
 static int  ui_reply_len;
 
+/* LVGL is not thread-safe; every lv_* call must run on the LVGL task
+ * thread. ui_append_reply_text / ui_clear_reply_text get called from
+ * the BT RX WQ thread when TEXT_CHUNK / TEXT_END frames arrive, and
+ * calling lv_label_set_text from there races with lv_task_handler's
+ * render pass (assertion "Invalidate area is not allowed during
+ * rendering" @ lv_refr.c:286).
+ *
+ * Fix: append into ui_reply_buf from any thread, then schedule an
+ * lv_async_call to do the lv_label_set_text on the LVGL thread's
+ * next task-handler cycle. Cheap — one pointer gets queued, label
+ * text updates happen atomically between LVGL frames.
+ */
+#ifdef CONFIG_APP_ANIMATION_PROCEDURAL
+static void ui_reply_flush_async(void *user_data)
+{
+	ARG_UNUSED(user_data);
+	if (ui.responding_label == NULL) {
+		return;
+	}
+	if (ui_reply_active) {
+		lv_label_set_text(ui.responding_label, ui_reply_buf);
+	} else {
+		lv_label_set_text(ui.responding_label, "_");
+	}
+}
+#endif
+
 void ui_append_reply_text(const char *utf8, int len)
 {
 	if (utf8 == NULL || len <= 0) {
@@ -269,9 +296,7 @@ void ui_append_reply_text(const char *utf8, int len)
 	}
 	ui_reply_active = true;
 #ifdef CONFIG_APP_ANIMATION_PROCEDURAL
-	if (ui.responding_label != NULL) {
-		lv_label_set_text(ui.responding_label, ui_reply_buf);
-	}
+	lv_async_call(ui_reply_flush_async, NULL);
 #endif
 }
 
@@ -281,9 +306,7 @@ void ui_clear_reply_text(void)
 	ui_reply_buf[0] = '\0';
 	ui_reply_active = false;
 #ifdef CONFIG_APP_ANIMATION_PROCEDURAL
-	if (ui.responding_label != NULL) {
-		lv_label_set_text(ui.responding_label, "_");
-	}
+	lv_async_call(ui_reply_flush_async, NULL);
 #endif
 }
 

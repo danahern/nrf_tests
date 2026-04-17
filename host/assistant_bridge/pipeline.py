@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 import wave
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -20,6 +21,11 @@ from typing import AsyncIterator, Awaitable, Callable, Protocol
 import httpx
 
 from .framing import Frame, FrameType, encode_frame
+
+
+def _debug(msg: str) -> None:
+    """Unified debug output — goes to stderr alongside bridge.py prints."""
+    print(f"[pipeline] {msg}", file=sys.stderr, flush=True)
 
 
 # ---------- config & results -------------------------------------------------
@@ -314,23 +320,33 @@ class AssistantPipeline:
         """Process a single inbound frame. Returns a :class:`PipelineResult`
         when STOP_LISTEN triggers a full transcribe→reply cycle."""
         if frame.type == FrameType.AUDIO:
-            pcm = self._opus.decode(frame.payload, self._cfg.frame_samples)
+            try:
+                pcm = self._opus.decode(frame.payload, self._cfg.frame_samples)
+            except Exception as e:
+                _debug(f"opus decode FAILED on {len(frame.payload)} B: {e!r}")
+                return None
             self._pcm_buf.extend(pcm)
             return None
         if frame.type == FrameType.CTRL_START_LISTEN:
+            _debug("CTRL_START_LISTEN — clearing pcm buffer")
             self._pcm_buf.clear()
             return None
         if frame.type == FrameType.CTRL_STOP_LISTEN:
+            _debug(f"CTRL_STOP_LISTEN — pcm_buf={len(self._pcm_buf)} B "
+                   f"({len(self._pcm_buf) / 2 / self._cfg.sample_rate:.2f} s)")
             return await self._finish_utterance()
-        # CTRL_STATE, TEXT_*, unknown-but-valid: ignored on the host ingress
-        # path. They are emitted by the host, not consumed from the device.
+        _debug(f"ignoring inbound frame type=0x{int(frame.type):02x} "
+               f"len={len(frame.payload)}")
         return None
 
     async def _finish_utterance(self, frames_counted: int | None = None) -> PipelineResult:
         pcm = bytes(self._pcm_buf)
         self._pcm_buf.clear()
+        _debug(f"transcribing {len(pcm)} B ({len(pcm) / 2 / self._cfg.sample_rate:.2f} s)")
         transcript = self._transcriber.transcribe(pcm, self._cfg.sample_rate)
+        _debug(f"transcript={transcript!r}")
         reply_text, chunks_sent = await self._stream_reply(transcript)
+        _debug(f"reply={reply_text!r} (chunks_sent={chunks_sent})")
         return PipelineResult(
             audio_frames_encoded=frames_counted or 0,
             transcript=transcript,

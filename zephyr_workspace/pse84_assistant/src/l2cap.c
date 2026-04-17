@@ -25,6 +25,7 @@
 #include <zephyr/net_buf.h>
 
 #include "framing.h"
+#include "link.h"
 #include "state.h"
 #include "ui.h"
 
@@ -62,8 +63,8 @@ static void l2cap_frame_cb(uint8_t type, uint8_t seq,
 		ui_append_reply_text((const char *)payload, (int)len);
 		break;
 	case FRAME_TYPE_TEXT_END:
-		LOG_INF("TEXT_END via L2CAP");
-		state_set(ASSIST_IDLE);
+		LOG_INF("TEXT_END via L2CAP — holding RESPONDING for 5 s");
+		link_schedule_idle_revert();
 		break;
 	case FRAME_TYPE_CTRL_STATE: {
 		if (len >= 1) {
