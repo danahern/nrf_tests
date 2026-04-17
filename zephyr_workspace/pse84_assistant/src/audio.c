@@ -37,9 +37,10 @@
 #include <string.h>
 #include <stdlib.h>
 
-#ifdef CONFIG_APP_AUDIO_EMIT_OPUS
 #include "opus_wrapper.h"
-#define OPUS_FRAME_SAMPLES 320  /* 20 ms @ 16 kHz */
+#include "framing.h"
+#include "gatt_svc.h"
+#ifdef CONFIG_APP_AUDIO_EMIT_OPUS
 #define OPUS_MAX_BYTES     320  /* per-frame ceiling (libopus safe upper bound at 16 kbps) */
 #endif
 
@@ -74,6 +75,14 @@ static int64_t audio_capture_stop_ms;
 static const struct device *dmic_dev;
 static bool audio_configured;
 static bool audio_capturing;
+
+/* Opus encoder for BLE streaming. 20 ms frames (320 samples @ 16 kHz
+ * mono), 16 kbps CBR VOIP. One 100 ms DMIC block = 5 Opus frames.
+ * Output bound: ~40 B/frame at 16 kbps; cap at 128 B with headroom. */
+#define OPUS_FRAME_SAMPLES    320
+#define OPUS_MAX_PACKET_BYTES 128
+static opus_wrap_ctx_t *opus_enc;
+static uint8_t opus_out_seq;
 
 /* Dedicated capture thread — blocks on dmic_read() while audio_capturing
  * is true, yielding as the DMA fills 100 ms chunks. A semaphore gates
@@ -179,10 +188,7 @@ static void audio_thread_fn(void *a, void *b, void *c)
 			 * writes them at init (s[0]=-26184, s[1]=9747 on this
 			 * kit) and never overwrites them. They pollute peak
 			 * calculation and corrupt the first 4 bytes of every
-			 * 100 ms window's worth of real audio. See heartbeat
-			 * trace (audio hb log lines) which shows s[0]/s[1]
-			 * frozen across all blocks while s[800] and s[n-1]
-			 * carry real mic data.
+			 * 100 ms window's worth of real audio.
 			 */
 			const size_t skip_bytes = 2 * sizeof(int16_t);
 			const uint8_t *src =
@@ -201,6 +207,43 @@ static void audio_thread_fn(void *a, void *b, void *c)
 				       src, copy_bytes);
 				audio_ring_samples += copy_bytes / sizeof(int16_t);
 				copied_blocks++;
+			}
+
+			/* Opus-encode and stream over BLE. 100 ms block =
+			 * 5 × 20 ms Opus frames. Each frame goes as one
+			 * FRAME_TYPE_AUDIO SDU. If no BLE peer subscribed,
+			 * gatt_svc_send returns -ENOTCONN and we drop. */
+			if (opus_enc != NULL && gatt_svc_is_connected()) {
+				const int16_t *pcm =
+					(const int16_t *)((const uint8_t *)buffer +
+							  skip_bytes);
+				size_t pcm_samples =
+					(src_bytes) / sizeof(int16_t);
+				size_t nframes =
+					pcm_samples / OPUS_FRAME_SAMPLES;
+
+				for (size_t f = 0; f < nframes; f++) {
+					uint8_t opus_pkt[OPUS_MAX_PACKET_BYTES];
+					int n = opus_wrap_encode_frame(
+						opus_enc,
+						pcm + f * OPUS_FRAME_SAMPLES,
+						OPUS_FRAME_SAMPLES,
+						opus_pkt, sizeof(opus_pkt));
+					if (n <= 0) {
+						continue;
+					}
+					uint8_t framed[FRAME_HEADER_LEN +
+						       OPUS_MAX_PACKET_BYTES];
+					int fn = frame_encode(
+						FRAME_TYPE_AUDIO,
+						opus_out_seq++,
+						opus_pkt, (uint16_t)n,
+						framed, sizeof(framed));
+					if (fn > 0) {
+						(void)gatt_svc_send(
+							framed, (uint16_t)fn);
+					}
+				}
 			}
 		}
 
@@ -250,6 +293,13 @@ int audio_init(void)
 
 	if (ret < 0) {
 		return ret;
+	}
+
+	/* Persistent Opus encoder for BLE streaming. 16 kHz / mono /
+	 * 16 kbps CBR — matches host bridge decode config. */
+	opus_enc = opus_wrap_init(AUDIO_SAMPLE_RATE_HZ, AUDIO_CHANNELS, 16000);
+	if (opus_enc == NULL) {
+		LOG_WRN("opus_wrap_init failed — BLE audio disabled");
 	}
 
 	audio_thread_id = k_thread_create(&audio_thread, audio_thread_stack,
@@ -335,8 +385,21 @@ int audio_capture_start(void)
 	memset(audio_ring, 0, sizeof(audio_ring));
 	audio_ring_samples = 0;
 	audio_capture_start_ms = k_uptime_get();
+	opus_out_seq = 0;
 	audio_capturing = true;
-	LOG_INF("audio capture START (ring armed)");
+
+	/* Tell the host to start buffering audio. The host uses this to
+	 * mark the beginning of a capture window for Whisper. */
+	if (gatt_svc_is_connected()) {
+		uint8_t framed[FRAME_HEADER_LEN];
+		int fn = frame_encode(FRAME_TYPE_CTRL_START_LISTEN, 0,
+				      NULL, 0, framed, sizeof(framed));
+		if (fn > 0) {
+			(void)gatt_svc_send(framed, (uint16_t)fn);
+		}
+	}
+
+	LOG_INF("audio capture START (ring armed, opus seq reset)");
 	return 0;
 }
 
@@ -443,6 +506,17 @@ int audio_capture_stop(void)
 	 */
 	audio_capturing = false;
 	audio_capture_stop_ms = k_uptime_get();
+
+	/* Signal end-of-utterance so the host can hand the buffered audio
+	 * to Whisper and start the LLM call. */
+	if (gatt_svc_is_connected()) {
+		uint8_t framed[FRAME_HEADER_LEN];
+		int fn = frame_encode(FRAME_TYPE_CTRL_STOP_LISTEN, 0,
+				      NULL, 0, framed, sizeof(framed));
+		if (fn > 0) {
+			(void)gatt_svc_send(framed, (uint16_t)fn);
+		}
+	}
 
 	/* Give the thread one block's worth of time to drain its pending
 	 * dmic_read() so we don't race on audio_ring_samples.
