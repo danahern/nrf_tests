@@ -89,6 +89,12 @@ opus_wrap_ctx_t *opus_wrap_init(int sample_rate, int channels, int bitrate_bps)
 	(void)opus_encoder_ctl(ctx->enc, OPUS_SET_DTX(0));
 	(void)opus_encoder_ctl(ctx->enc, OPUS_SET_APPLICATION(OPUS_APPLICATION_VOIP));
 	(void)opus_encoder_ctl(ctx->enc, OPUS_SET_SIGNAL(OPUS_SIGNAL_VOICE));
+	/* Complexity 0 — minimum SILK analysis. Default (9/10) does heavy
+	 * pitch/NSQ search that costs 3-5x compute without meaningful
+	 * quality win at 16 kbps voice. With libopus running from XIP
+	 * flash on an M55, default complexity is ~46 ms/frame (2.3x
+	 * real-time); complexity 0 should come in well under budget. */
+	(void)opus_encoder_ctl(ctx->enc, OPUS_SET_COMPLEXITY(0));
 
 	ctx->sample_rate = sample_rate;
 	ctx->channels = channels;

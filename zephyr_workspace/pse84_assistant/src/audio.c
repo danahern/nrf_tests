@@ -88,11 +88,21 @@ static uint8_t opus_out_seq;
  * is true, yielding as the DMA fills 100 ms chunks. A semaphore gates
  * the thread on start/stop so it isn't spinning when idle.
  */
-/* 2 KB was enough for the PCM-only path; libopus encoder needs
- * ~3–4 KB of stack per encode call, and can preempt-overflow at 4 KB when
- * BT ISRs land mid-encode. 8 KB is comfortable now that m55_data grew
- * to 1.25 MB (see the overlay's &m55_data reg override). */
-#define AUDIO_THREAD_STACK_SIZE 8192
+/* Audio thread stack.
+ *
+ * libopus is built with VAR_ARRAYS (see modules/libopus/CMakeLists.txt),
+ * so opus_encode's silk/celt scratch buffers are C99 VLAs on the caller's
+ * stack. For fixed-point 16 kHz 20 ms mono VoIP the combined VLA footprint
+ * is substantial (internal resampler mirrors, bandwidth-detection arrays,
+ * overlap windows). Plus bt_gatt_notify_cb on the same iteration pushes
+ * an ACL PDU through the caller's stack (another ~2-4 KB).
+ *
+ * Sizing journey: 4 KB → overflow, 8 KB → overflow, 16 KB → overflow on
+ * first encode after capture-start (register dump all 0xaa = SP blew well
+ * past the guard, not a near miss). 32 KB gives unambiguous headroom and
+ * is cheap — m55_data is 2 MB.
+ */
+#define AUDIO_THREAD_STACK_SIZE 32768
 #define AUDIO_THREAD_PRIORITY   5
 
 static K_SEM_DEFINE(audio_capture_sem, 0, 1);
@@ -227,6 +237,8 @@ static void audio_thread_fn(void *a, void *b, void *c)
 					pcm_samples / OPUS_FRAME_SAMPLES;
 				static int enc_err_rate_limit;
 
+				int64_t t_enc_start = k_uptime_get();
+				int frames_sent = 0;
 				for (size_t f = 0; f < nframes; f++) {
 					uint8_t opus_pkt[OPUS_MAX_PACKET_BYTES];
 					int n = opus_wrap_encode_frame(
@@ -251,7 +263,17 @@ static void audio_thread_fn(void *a, void *b, void *c)
 					if (fn > 0) {
 						(void)gatt_svc_send(
 							framed, (uint16_t)fn);
+						frames_sent++;
 					}
+				}
+				static int perf_log_once;
+				if (!perf_log_once && frames_sent > 0) {
+					int64_t dur = k_uptime_get() - t_enc_start;
+					LOG_INF("perf: %d frames in %lld ms "
+						"(%lld ms/frame, budget=20)",
+						frames_sent, dur,
+						dur / frames_sent);
+					perf_log_once = 1;
 				}
 			} else if (audio_capturing) {
 				static int gate_log_rate_limit;
@@ -318,7 +340,9 @@ int audio_init(void)
 	if (opus_enc == NULL) {
 		LOG_WRN("opus_wrap_init failed — BLE audio disabled");
 	} else {
-		LOG_INF("opus_wrap_init ok — ready for BLE audio streaming");
+		extern uint32_t SystemCoreClock;
+		LOG_INF("opus_wrap_init ok — M55 SystemCoreClock=%u Hz",
+			(unsigned)SystemCoreClock);
 	}
 
 	audio_thread_id = k_thread_create(&audio_thread, audio_thread_stack,
