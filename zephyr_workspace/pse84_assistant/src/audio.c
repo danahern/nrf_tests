@@ -88,7 +88,9 @@ static uint8_t opus_out_seq;
  * is true, yielding as the DMA fills 100 ms chunks. A semaphore gates
  * the thread on start/stop so it isn't spinning when idle.
  */
-#define AUDIO_THREAD_STACK_SIZE 2048
+/* 2 KB was enough for the PCM-only path; libopus encoder needs
+ * ~3-4 KB of stack per encode call. 4 KB is the sweet spot. */
+#define AUDIO_THREAD_STACK_SIZE 4096
 #define AUDIO_THREAD_PRIORITY   5
 
 static K_SEM_DEFINE(audio_capture_sem, 0, 1);
@@ -221,6 +223,7 @@ static void audio_thread_fn(void *a, void *b, void *c)
 					(src_bytes) / sizeof(int16_t);
 				size_t nframes =
 					pcm_samples / OPUS_FRAME_SAMPLES;
+				static int enc_err_rate_limit;
 
 				for (size_t f = 0; f < nframes; f++) {
 					uint8_t opus_pkt[OPUS_MAX_PACKET_BYTES];
@@ -230,6 +233,10 @@ static void audio_thread_fn(void *a, void *b, void *c)
 						OPUS_FRAME_SAMPLES,
 						opus_pkt, sizeof(opus_pkt));
 					if (n <= 0) {
+						if ((enc_err_rate_limit++ & 0x3f) == 0) {
+							LOG_WRN("opus_encode rc=%d "
+								"(rate-limited)", n);
+						}
 						continue;
 					}
 					uint8_t framed[FRAME_HEADER_LEN +
@@ -243,6 +250,13 @@ static void audio_thread_fn(void *a, void *b, void *c)
 						(void)gatt_svc_send(
 							framed, (uint16_t)fn);
 					}
+				}
+			} else if (audio_capturing) {
+				static int gate_log_rate_limit;
+				if ((gate_log_rate_limit++ & 0x1f) == 0) {
+					LOG_WRN("opus send gated: enc=%p connected=%d",
+						(void *)opus_enc,
+						(int)gatt_svc_is_connected());
 				}
 			}
 		}
@@ -553,13 +567,20 @@ int audio_capture_stop(void)
 
 	/* Emit the framed hex dump. The trailing \n on the markers makes
 	 * line-oriented host parsing trivial.
+	 *
+	 * Skip when BLE is connected — the audio already went out over
+	 * GATT as Opus frames during capture, and the hex dump takes
+	 * ~2.8 s of sysworkq time at 460800 baud which overflows the
+	 * workqueue stack.
 	 */
-	printk("=== PCM_BEGIN samples=%u sample_rate=%d channels=%d bits=%d ===\n",
-	       (unsigned)audio_ring_samples, AUDIO_SAMPLE_RATE_HZ,
-	       AUDIO_CHANNELS, AUDIO_BITS_PER_SAMPLE);
-	audio_hex_dump((const uint8_t *)audio_ring,
-		       audio_ring_samples * sizeof(int16_t));
-	printk("=== PCM_END ===\n");
+	if (!gatt_svc_is_connected()) {
+		printk("=== PCM_BEGIN samples=%u sample_rate=%d channels=%d bits=%d ===\n",
+		       (unsigned)audio_ring_samples, AUDIO_SAMPLE_RATE_HZ,
+		       AUDIO_CHANNELS, AUDIO_BITS_PER_SAMPLE);
+		audio_hex_dump((const uint8_t *)audio_ring,
+			       audio_ring_samples * sizeof(int16_t));
+		printk("=== PCM_END ===\n");
+	}
 
 #ifdef CONFIG_APP_AUDIO_EMIT_OPUS
 	/* Phase 3: Opus-encode the same buffer into 20 ms frames and emit
