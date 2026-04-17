@@ -8,6 +8,7 @@
  * |type|seq|len|payload| framing from the master plan.
  */
 #include "ble.h"
+#include "l2cap.h"
 
 #ifdef CONFIG_BT
 
@@ -83,6 +84,12 @@ static void ble_thread_fn(void *a, void *b, void *c)
 		return;
 	}
 	LOG_INF("advertising as '%s'", CONFIG_BT_DEVICE_NAME);
+
+	err = l2cap_init();
+	if (err) {
+		LOG_ERR("l2cap_init failed: %d", err);
+	}
+
 	k_event_post(&ble_ready_event, BLE_EVT_READY);
 }
 
