@@ -27,4 +27,8 @@ int gatt_svc_send(const uint8_t *data, uint16_t len);
 
 bool gatt_svc_is_connected(void);
 
+/* Log tx_sent / tx_failed counters. Useful from audio heartbeat to
+ * see how many Opus frames made it out vs got rejected. */
+void gatt_svc_log_stats(void);
+
 #endif

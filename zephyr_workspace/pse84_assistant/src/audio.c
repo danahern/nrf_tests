@@ -272,6 +272,7 @@ static void audio_thread_fn(void *a, void *b, void *c)
 				buffer, (unsigned)size, (int)s[0], (int)s[1],
 				(int)s[800], (int)s[n - 1], (long)peak,
 				(int)audio_capturing);
+			gatt_svc_log_stats();
 			last_log_ms = now;
 		}
 	}

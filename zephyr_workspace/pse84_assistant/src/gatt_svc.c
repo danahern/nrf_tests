@@ -14,6 +14,7 @@
 
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/sys/atomic.h>
 #include <zephyr/bluetooth/bluetooth.h>
 #include <zephyr/bluetooth/gatt.h>
 #include <zephyr/bluetooth/uuid.h>
@@ -138,15 +139,18 @@ int gatt_svc_init(void)
 	return 0;
 }
 
+static atomic_t tx_sent;
+static atomic_t tx_failed;
+
 int gatt_svc_send(const uint8_t *data, uint16_t len)
 {
 	if (!current_conn || !tx_notifications_enabled) {
+		atomic_inc(&tx_failed);
 		return -ENOTCONN;
 	}
 
-	/* Find the TX value attribute (index 1 in the service — after the
-	 * service declaration at 0 and the characteristic declaration).
-	 * BT_GATT_SERVICE_DEFINE places attrs sequentially. */
+	/* attrs[2] is the TX characteristic value; BT_GATT_SERVICE_DEFINE
+	 * lays out: primary[0], char-decl[1], char-value[2], CCC[3]. */
 	const struct bt_gatt_attr *tx_attr = &asst_svc.attrs[2];
 
 	struct bt_gatt_notify_params params = {
@@ -155,7 +159,20 @@ int gatt_svc_send(const uint8_t *data, uint16_t len)
 		.len = len,
 	};
 
-	return bt_gatt_notify_cb(current_conn, &params);
+	int ret = bt_gatt_notify_cb(current_conn, &params);
+	if (ret) {
+		atomic_inc(&tx_failed);
+	} else {
+		atomic_inc(&tx_sent);
+	}
+	return ret;
+}
+
+void gatt_svc_log_stats(void)
+{
+	LOG_INF("gatt_svc tx: sent=%u failed=%u",
+		(unsigned)atomic_get(&tx_sent),
+		(unsigned)atomic_get(&tx_failed));
 }
 
 bool gatt_svc_is_connected(void)
