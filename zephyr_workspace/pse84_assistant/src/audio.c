@@ -315,6 +315,8 @@ int audio_init(void)
 	opus_enc = opus_wrap_init(AUDIO_SAMPLE_RATE_HZ, AUDIO_CHANNELS, 16000);
 	if (opus_enc == NULL) {
 		LOG_WRN("opus_wrap_init failed — BLE audio disabled");
+	} else {
+		LOG_INF("opus_wrap_init ok — ready for BLE audio streaming");
 	}
 
 	audio_thread_id = k_thread_create(&audio_thread, audio_thread_stack,

@@ -70,12 +70,15 @@ opus_wrap_ctx_t *opus_wrap_init(int sample_rate, int channels, int bitrate_bps)
 		return NULL;
 	}
 
+	/* Decoder is optional — M55 only encodes; host→device audio
+	 * (Phase 8 TTS) is the only caller that needs it. If malloc
+	 * can't fit both enc+dec, keep the encoder and log. Callers
+	 * of opus_wrap_decode_frame must handle ctx->dec == NULL. */
 	ctx->dec = opus_decoder_create(sample_rate, channels, &err);
 	if (err != OPUS_OK || ctx->dec == NULL) {
-		LOG_ERR("opus_decoder_create failed: %d", err);
-		opus_encoder_destroy(ctx->enc);
-		k_free(ctx);
-		return NULL;
+		LOG_WRN("opus_decoder_create failed: %d (encoder still "
+			"available for TX-only use)", err);
+		ctx->dec = NULL;
 	}
 
 	/* CBR, no DTX, no FEC — predictable wire budget, matches the
@@ -120,6 +123,9 @@ int opus_wrap_decode_frame(opus_wrap_ctx_t *ctx,
 {
 	if (ctx == NULL || pcm_out == NULL) {
 		return -EINVAL;
+	}
+	if (ctx->dec == NULL) {
+		return -ENOTSUP;
 	}
 	if (out_cap_samples < ctx->frame_samples * ctx->channels) {
 		return -ENOSPC;
