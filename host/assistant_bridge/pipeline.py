@@ -147,6 +147,170 @@ class OllamaLLM:
                         return
 
 
+class AnthropicLLM:
+    """Anthropic /v1/messages streaming client. SSE event stream.
+
+    Parses ``content_block_delta`` events for the text deltas and yields
+    the ``text`` field to match the OllamaLLM interface. Other event
+    types (message_start, ping, content_block_start/stop, message_stop)
+    are ignored.
+    """
+
+    def __init__(
+        self,
+        api_key: str,
+        model: str = "claude-haiku-4-5",
+        timeout: float = 60.0,
+        system_prompt: str | None = None,
+        max_tokens: int = 1024,
+    ):
+        if not api_key:
+            raise ValueError("AnthropicLLM requires an API key "
+                             "(set ANTHROPIC_API_KEY or pass --anthropic-api-key)")
+        self._api_key = api_key
+        self._model = model
+        self._timeout = timeout
+        self._system_prompt = system_prompt
+        self._max_tokens = max_tokens
+        self._url = "https://api.anthropic.com/v1/messages"
+
+    async def stream_reply(self, prompt: str) -> AsyncIterator[str]:
+        body: dict = {
+            "model": self._model,
+            "max_tokens": self._max_tokens,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": True,
+        }
+        if self._system_prompt:
+            body["system"] = self._system_prompt
+        headers = {
+            "x-api-key": self._api_key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        }
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            async with client.stream("POST", self._url, json=body,
+                                     headers=headers) as resp:
+                resp.raise_for_status()
+                async for line in resp.aiter_lines():
+                    if not line or not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if not data:
+                        continue
+                    try:
+                        obj = json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
+                    if obj.get("type") == "content_block_delta":
+                        delta = obj.get("delta") or {}
+                        text = delta.get("text")
+                        if text:
+                            yield text
+                    elif obj.get("type") == "message_stop":
+                        return
+
+
+class OpenAICompatLLM:
+    """OpenAI-compatible /v1/chat/completions streaming client.
+
+    Works with OpenAI proper, OpenRouter, LiteLLM, LocalAI, vLLM,
+    or anything else exposing the OpenAI chat-completions SSE protocol.
+    Supply ``base_url`` + ``api_key`` + ``model`` for your target.
+    """
+
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        base_url: str = "https://api.openai.com",
+        timeout: float = 60.0,
+        system_prompt: str | None = None,
+    ):
+        if not api_key:
+            raise ValueError("OpenAICompatLLM requires an API key "
+                             "(set OPENAI_API_KEY or pass --openai-api-key)")
+        self._api_key = api_key
+        self._model = model
+        self._timeout = timeout
+        self._system_prompt = system_prompt
+        self._url = base_url.rstrip("/") + "/v1/chat/completions"
+
+    async def stream_reply(self, prompt: str) -> AsyncIterator[str]:
+        messages: list[dict[str, str]] = []
+        if self._system_prompt:
+            messages.append({"role": "system", "content": self._system_prompt})
+        messages.append({"role": "user", "content": prompt})
+        body = {
+            "model": self._model,
+            "messages": messages,
+            "stream": True,
+        }
+        headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "Content-Type": "application/json",
+        }
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            async with client.stream("POST", self._url, json=body,
+                                     headers=headers) as resp:
+                resp.raise_for_status()
+                async for line in resp.aiter_lines():
+                    if not line or not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        return
+                    if not data:
+                        continue
+                    try:
+                        obj = json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
+                    choices = obj.get("choices") or []
+                    if not choices:
+                        continue
+                    delta = choices[0].get("delta") or {}
+                    content = delta.get("content")
+                    if content:
+                        yield content
+
+
+class OpenClawLLM(OpenAICompatLLM):
+    """OpenClaw bridge — just the OpenAI-compatible endpoint under the hood.
+
+    Per the OpenClaw docs (docs.openclaw.ai/gateway/openai-http-api), the
+    gateway exposes ``POST /v1/chat/completions`` on the same port as the
+    WS gateway. Model ids are ``openclaw`` / ``openclaw/default`` /
+    ``openclaw/<agentId>``. That's the simplest correct path — we don't
+    need to speak the custom WS protocol for plain chat.
+
+    This subclass just plugs OpenClaw-appropriate defaults into the base
+    OpenAICompatLLM: the loopback URL, the bearer token, and a model id
+    that routes to the configured agent.
+    """
+
+    def __init__(
+        self,
+        base_url: str,
+        token: str,
+        agent_id: str = "default",
+        timeout: float = 60.0,
+        system_prompt: str | None = None,
+    ):
+        if not token:
+            raise ValueError("OpenClawLLM requires a bearer token "
+                             "(set OPENCLAW_BEARER_TOKEN or pass "
+                             "--openclaw-token)")
+        model = f"openclaw/{agent_id}" if agent_id else "openclaw"
+        super().__init__(
+            api_key=token,
+            model=model,
+            base_url=base_url,
+            timeout=timeout,
+            system_prompt=system_prompt,
+        )
+
+
 class FasterWhisperTranscriber:
     """Thin faster-whisper wrapper. Import lazily so tests don't need it."""
 

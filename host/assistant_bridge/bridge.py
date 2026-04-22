@@ -23,9 +23,12 @@ from typing import Optional
 from .framing import Frame, FrameType, StreamingFrameParser, decode_frame
 from .pipeline import (
     DEFAULT_SYSTEM_PROMPT,
+    AnthropicLLM,
     AssistantPipeline,
     DryRunLLM,
     OllamaLLM,
+    OpenAICompatLLM,
+    OpenClawLLM,
     PipelineConfig,
     build_fake_transcriber,
 )
@@ -45,6 +48,29 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--input", type=Path, help="WAV path for --transport=file-inject")
     p.add_argument(
+        "--llm-backend",
+        choices=["ollama", "claude", "openai", "openclaw"],
+        default=os.environ.get("LLM_BACKEND", "ollama"),
+        help=("Which LLM backend to route prompts through. 'openai' is "
+              "OpenAI-compatible (works with OpenRouter, LiteLLM, etc "
+              "via --openai-base-url). Env: LLM_BACKEND."),
+    )
+    p.add_argument(
+        "--openclaw-url",
+        default=os.environ.get("OPENCLAW_URL", "http://127.0.0.1:18789"),
+        help="OpenClaw gateway base URL (env: OPENCLAW_URL).",
+    )
+    p.add_argument(
+        "--openclaw-token",
+        default=os.environ.get("OPENCLAW_BEARER_TOKEN"),
+        help="OpenClaw bearer token (env: OPENCLAW_BEARER_TOKEN).",
+    )
+    p.add_argument(
+        "--openclaw-agent",
+        default=os.environ.get("OPENCLAW_AGENT", "main"),
+        help="OpenClaw agent id (env: OPENCLAW_AGENT, default 'main').",
+    )
+    p.add_argument(
         "--ollama-url",
         default=os.environ.get(
             "OLLAMA_URL", "http://192.168.1.129:11434"
@@ -53,9 +79,38 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--ollama-model", default="glm-4.7-flash:latest")
     p.add_argument(
+        "--anthropic-api-key",
+        default=os.environ.get("ANTHROPIC_API_KEY"),
+        help="Anthropic API key (env: ANTHROPIC_API_KEY). "
+             "Required for --llm-backend=claude.",
+    )
+    p.add_argument(
+        "--claude-model",
+        default=os.environ.get("CLAUDE_MODEL", "claude-haiku-4-5"),
+        help="Claude model id (env: CLAUDE_MODEL). Defaults to Haiku 4.5 "
+             "for voice latency; use claude-sonnet-4-6 or claude-opus-4-7 "
+             "for higher quality.",
+    )
+    p.add_argument(
+        "--openai-api-key",
+        default=os.environ.get("OPENAI_API_KEY"),
+        help="OpenAI-compatible API key (env: OPENAI_API_KEY).",
+    )
+    p.add_argument(
+        "--openai-base-url",
+        default=os.environ.get("OPENAI_BASE_URL", "https://api.openai.com"),
+        help="OpenAI-compatible base URL (env: OPENAI_BASE_URL). "
+             "Change for OpenRouter / LiteLLM / local vLLM endpoints.",
+    )
+    p.add_argument(
+        "--openai-model",
+        default=os.environ.get("OPENAI_MODEL", "gpt-4o-mini"),
+        help="OpenAI-compatible model id (env: OPENAI_MODEL).",
+    )
+    p.add_argument(
         "--system-prompt",
         default=DEFAULT_SYSTEM_PROMPT,
-        help="System prompt sent to Ollama on every turn",
+        help="System prompt sent to the LLM on every turn",
     )
     p.add_argument(
         "--uart-port",
@@ -126,7 +181,27 @@ def _build_codecs(args: argparse.Namespace):
         llm = DryRunLLM(
             reply=f"(dry-run) You said: '{args.fake_transcript}'. Canned reply."
         )
-    else:
+    elif args.llm_backend == "claude":
+        llm = AnthropicLLM(
+            api_key=args.anthropic_api_key,
+            model=args.claude_model,
+            system_prompt=args.system_prompt,
+        )
+    elif args.llm_backend == "openai":
+        llm = OpenAICompatLLM(
+            api_key=args.openai_api_key,
+            model=args.openai_model,
+            base_url=args.openai_base_url,
+            system_prompt=args.system_prompt,
+        )
+    elif args.llm_backend == "openclaw":
+        llm = OpenClawLLM(
+            base_url=args.openclaw_url,
+            token=args.openclaw_token,
+            agent_id=args.openclaw_agent,
+            system_prompt=args.system_prompt,
+        )
+    else:  # ollama (default)
         llm = OllamaLLM(
             base_url=args.ollama_url,
             model=args.ollama_model,
