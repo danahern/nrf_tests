@@ -7,8 +7,8 @@
 
 #include "sprite_types.h"
 
-#define LISTENING_WIDTH   800
-#define LISTENING_HEIGHT  480
+#define LISTENING_WIDTH   400
+#define LISTENING_HEIGHT  240
 #define LISTENING_FPS     24
 #define LISTENING_FRAMES  72
 

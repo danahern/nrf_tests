@@ -7,8 +7,8 @@
 
 #include "sprite_types.h"
 
-#define RESPONDING_WIDTH   800
-#define RESPONDING_HEIGHT  480
+#define RESPONDING_WIDTH   400
+#define RESPONDING_HEIGHT  240
 #define RESPONDING_FPS     24
 #define RESPONDING_FRAMES  72
 

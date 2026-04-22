@@ -122,6 +122,18 @@ i2c0: &scb0 {
 			reg = <0x26410000 DT_SIZE_K(64)>;
 			zephyr,memory-region = "SOCMEM_AUDIO";
 		};
+
+		/* Phase 1b sprite scratch — LZ4 decompress target for one
+		 * RGB565 frame. Sprites.c sizes its buffer check against
+		 * tier-A max (800*480*2 = 750 KB), not the tier actually
+		 * in use — so the region must be ≥ 750 KB even when running
+		 * at tier B (192 KB/frame). Round up to 768 KB for alignment.
+		 * Sits in the unclaimed SOCMEM tail after socmem_audio. */
+		socmem_sprite: memory@26420000 {
+			compatible = "zephyr,memory-region", "mmio-sram";
+			reg = <0x26420000 DT_SIZE_K(768)>;
+			zephyr,memory-region = "SOCMEM_SPRITE";
+		};
 	};
 };
 

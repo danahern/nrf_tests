@@ -7,8 +7,8 @@
 
 #include "sprite_types.h"
 
-#define IDLE_WIDTH   800
-#define IDLE_HEIGHT  480
+#define IDLE_WIDTH   400
+#define IDLE_HEIGHT  240
 #define IDLE_FPS     24
 #define IDLE_FRAMES  72
 

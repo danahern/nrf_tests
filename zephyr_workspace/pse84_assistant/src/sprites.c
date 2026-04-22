@@ -261,11 +261,12 @@ void sprites_get_stats(struct sprite_stats *out)
 #include "../assets/thinking/frames.h"
 #include "../assets/responding/frames.h"
 
-#if CONFIG_APP_ANIMATION_SPRITES_TIER_B
-#define SHEET_ZOOM 512
-#else
+/* PERF PROBE 2026-04-16: 10 fps @ 2x scale. Try native 400x240 to
+ * isolate whether the LVGL software scale blit (400x240 → 800x480 =
+ * 384k pixel r/w per frame) is the bottleneck or if LZ4 decode /
+ * XIP reads are. Revert this to the old #if CONFIG_…TIER_B branch
+ * once we've measured. */
 #define SHEET_ZOOM LV_SCALE_NONE
-#endif
 
 const struct sprite_sheet sprite_sheet_idle = {
 	.name = "idle",

@@ -7,8 +7,8 @@
 
 #include "sprite_types.h"
 
-#define THINKING_WIDTH   800
-#define THINKING_HEIGHT  480
+#define THINKING_WIDTH   400
+#define THINKING_HEIGHT  240
 #define THINKING_FPS     24
 #define THINKING_FRAMES  72
 
